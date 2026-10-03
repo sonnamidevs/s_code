@@ -9,3 +9,4 @@ local.properties
 .flutter-plugins
 .flutter-plugins-dependencies
 .dart_tool/
+.dart_tool/
