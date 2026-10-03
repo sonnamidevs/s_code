@@ -55,6 +55,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _pythonRoot;
   String? _pythonBin;
 
+  // Bump this when extraction logic changes to force re-extraction
+  static const String _extractVersion = 'v2';
+
   @override
   void initState() {
     super.initState();
@@ -68,29 +71,71 @@ class _HomeScreenState extends State<HomeScreen> {
       _pythonBin = '$_pythonRoot/bin/python3';
 
       final root = Directory(_pythonRoot!);
+      final versionFile = File('$_pythonRoot/.$_extractVersion');
 
-      if (!File(_pythonBin!).existsSync()) {
+      // Force re-extraction if version marker is missing
+      if (!versionFile.existsSync()) {
+        if (root.existsSync()) {
+          setState(() => _status = 'Cleaning old runtime...');
+          root.deleteSync(recursive: true);
+        }
+
         setState(() => _status = 'Extracting Python runtime...');
         await root.create(recursive: true);
 
+        // Extract the tar.gz
         final data = await rootBundle.load('assets/python/python-embed.tar.gz');
         final tmpTar = File('$_pythonRoot/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
-        setState(() => _status = 'Unpacking runtime...');
-        final result = await Process.run(
-          'tar',
-          ['-xzf', tmpTar.path, '-C', _pythonRoot!],
+        setState(() => _status = 'Unpacking runtime (be patient)...');
+
+        // Use -p to preserve permissions from the archive
+        final extract = await Process.run(
+          '/system/bin/sh',
+          ['-c', 'cd "$_pythonRoot" && tar -xpf py.tar.gz'],
         );
-        if (result.exitCode != 0) {
-          _append('tar error: ${result.stderr}');
-          return;
+        _append('tar exit: ${extract.exitCode}');
+        if ((extract.stderr as String).isNotEmpty) {
+          _append('tar err: ${extract.stderr}');
         }
         await tmpTar.delete();
-      }
 
-      await Process.run('chmod', ['-R', '755', '$_pythonRoot/bin']);
-      await Process.run('chmod', ['+x', _pythonBin!]);
+        // Fix permissions explicitly via sh
+        setState(() => _status = 'Setting permissions...');
+        final chmod = await Process.run(
+          '/system/bin/sh',
+          [
+            '-c',
+            'chmod -R 755 "$_pythonRoot/bin" "$_pythonRoot/lib" 2>&1'
+          ],
+        );
+        _append('chmod exit: ${chmod.exitCode}');
+        if ((chmod.stdout as String).isNotEmpty) {
+          _append('chmod out: ${chmod.stdout}');
+        }
+        if ((chmod.stderr as String).isNotEmpty) {
+          _append('chmod err: ${chmod.stderr}');
+        }
+
+        // Ensure python3 itself is executable
+        await Process.run(
+          '/system/bin/sh',
+          ['-c', 'chmod 755 "$_pythonBin" 2>&1'],
+        );
+
+        // Verify: list the bin folder
+        final ls = await Process.run(
+          '/system/bin/sh',
+          ['-c', 'ls -la "$_pythonRoot/bin"'],
+        );
+        _append('--- bin listing ---');
+        _append(ls.stdout as String);
+
+        await versionFile.writeAsString(_extractVersion);
+      } else {
+        _append('Runtime already extracted ($_extractVersion).');
+      }
 
       setState(() {
         _isSetupComplete = true;
@@ -127,14 +172,17 @@ print("S Code prototype: working.")
 ''');
 
     try {
+      // Run through sh with proper env variables
+      final cmd = '''
+export PYTHONHOME="$_pythonRoot"
+export PYTHONPATH="$_pythonRoot/stdlib"
+export LD_LIBRARY_PATH="$_pythonRoot/lib"
+"$_pythonBin" "${scriptFile.path}"
+''';
+
       final result = await Process.run(
-        _pythonBin!,
-        [scriptFile.path],
-        environment: {
-          'PYTHONHOME': _pythonRoot!,
-          'PYTHONPATH': '$_pythonRoot/stdlib',
-          'LD_LIBRARY_PATH': '$_pythonRoot/lib',
-        },
+        '/system/bin/sh',
+        ['-c', cmd],
       );
 
       _append('exit code: ${result.exitCode}');
