@@ -76,13 +76,25 @@ class _HomeScreenState extends State<HomeScreen> {
       _pythonStdlibDir = '${docsDir.path}/stdlib_extracted';
       final stdlibDir = Directory(_pythonStdlibDir!);
 
-      final pythonExecutable = File('$_nativeLibDir/libpython3.so');
-      if (!pythonExecutable.existsSync()) {
+      // Check the wrapper binary is present
+      final wrapper = File('$_nativeLibDir/libpython3-exec.so');
+      if (!wrapper.existsSync()) {
         throw Exception(
-            'Python executable not found in native library directory. Ensure you placed libpython3.so in jniLibs.');
+            'Python wrapper not found in native library directory. Check jniLibs.');
       }
 
-      final versionMarker = File('${stdlibDir.path}/.extracted_v3');
+      // Check the real Python shared library is present
+      final pyLibFiles = Directory(_nativeLibDir!)
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('libpython3.') && f.path.endsWith('.so'))
+          .toList();
+      if (pyLibFiles.isEmpty) {
+        throw Exception(
+            'libpython3.x.so not found in native library directory. Check jniLibs.');
+      }
+
+      final versionMarker = File('${stdlibDir.path}/.extracted_v5');
       if (!versionMarker.existsSync()) {
         setState(() => _status = 'Extracting Python standard library...');
         if (stdlibDir.existsSync()) stdlibDir.deleteSync(recursive: true);
@@ -104,7 +116,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _append('Tar extraction error: ${result.stderr}');
         }
         await tmpTar.delete();
-        await versionMarker.writeAsString('v3');
+        await versionMarker.writeAsString('v5');
       }
 
       setState(() {
@@ -112,7 +124,10 @@ class _HomeScreenState extends State<HomeScreen> {
         _status = 'Ready';
       });
       _append('Runtime ready.');
-      _append('Executable: $pythonExecutable');
+      _append('Native lib dir: $_nativeLibDir');
+      _append('Python wrapper: ${wrapper.path}');
+      _append(
+          'Python libs: ${pyLibFiles.map((f) => f.path.split('/').last).join(', ')}');
       _append('Stdlib: $_pythonStdlibDir');
     } catch (e, st) {
       _append('Setup failed: $e');
@@ -144,11 +159,13 @@ print("S Code prototype: working.")
 ''');
 
     try {
+      // Run the wrapper with LD_LIBRARY_PATH pointing at native lib dir
+      // so it can find libpython3.14.so, libcrypto, etc.
       final cmd = '''
 export PYTHONHOME="$_pythonStdlibDir/stdlib"
 export PYTHONPATH="$_pythonStdlibDir/stdlib"
 export LD_LIBRARY_PATH="$_nativeLibDir"
-"$_nativeLibDir/libpython3.so" "${scriptFile.path}"
+"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"
 ''';
 
       final result = await Process.run('/system/bin/sh', ['-c', cmd]);
@@ -192,9 +209,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('S Code'),
-      ),
+      appBar: AppBar(title: const Text('S Code')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
