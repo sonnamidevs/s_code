@@ -47,16 +47,15 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  static const MethodChannel _channel =
+      MethodChannel('com.sonnamidevs.s_code/native');
 
   bool _isSetupComplete = false;
   bool _isRunning = false;
   String _status = 'Preparing runtime...';
 
-  String? _pythonRoot;
-  String? _pythonBin;
-
-  // Bump this when extraction logic changes to force re-extraction
-  static const String _extractVersion = 'v2';
+  String? _nativeLibDir;
+  String? _pythonStdlibDir;
 
   @override
   void initState() {
@@ -66,83 +65,55 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _setupPython() async {
     try {
+      setState(() => _status = 'Locating native directory...');
+      _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
+
+      if (_nativeLibDir == null || _nativeLibDir!.isEmpty) {
+        throw Exception('Could not determine native library directory.');
+      }
+
       final docsDir = await getApplicationDocumentsDirectory();
-      _pythonRoot = '${docsDir.path}/pyenv';
-      _pythonBin = '$_pythonRoot/bin/python3';
+      _pythonStdlibDir = '${docsDir.path}/stdlib_extracted';
+      final stdlibDir = Directory(_pythonStdlibDir!);
 
-      final root = Directory(_pythonRoot!);
-      final versionFile = File('$_pythonRoot/.$_extractVersion');
+      final pythonExecutable = File('$_nativeLibDir/libpython3.so');
+      if (!pythonExecutable.existsSync()) {
+        throw Exception(
+            'Python executable not found in native library directory. Ensure you placed libpython3.so in jniLibs.');
+      }
 
-      // Force re-extraction if version marker is missing
-      if (!versionFile.existsSync()) {
-        if (root.existsSync()) {
-          setState(() => _status = 'Cleaning old runtime...');
-          root.deleteSync(recursive: true);
-        }
+      final versionMarker = File('${stdlibDir.path}/.extracted_v3');
+      if (!versionMarker.existsSync()) {
+        setState(() => _status = 'Extracting Python standard library...');
+        if (stdlibDir.existsSync()) stdlibDir.deleteSync(recursive: true);
+        await stdlibDir.create(recursive: true);
 
-        setState(() => _status = 'Extracting Python runtime...');
-        await root.create(recursive: true);
-
-        // Extract the tar.gz
         final data = await rootBundle.load('assets/python/python-embed.tar.gz');
-        final tmpTar = File('$_pythonRoot/py.tar.gz');
+        final tmpTar = File('${docsDir.path}/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
-        setState(() => _status = 'Unpacking runtime (be patient)...');
-
-        // Use -p to preserve permissions from the archive
-        final extract = await Process.run(
-          '/system/bin/sh',
-          ['-c', 'cd "$_pythonRoot" && tar -xpf py.tar.gz'],
-        );
-        _append('tar exit: ${extract.exitCode}');
-        if ((extract.stderr as String).isNotEmpty) {
-          _append('tar err: ${extract.stderr}');
-        }
-        await tmpTar.delete();
-
-        // Fix permissions explicitly via sh
-        setState(() => _status = 'Setting permissions...');
-        final chmod = await Process.run(
+        final result = await Process.run(
           '/system/bin/sh',
           [
             '-c',
-            'chmod -R 755 "$_pythonRoot/bin" "$_pythonRoot/lib" 2>&1'
+            'cd "${stdlibDir.path}" && tar -xzf "${tmpTar.path}" stdlib lib'
           ],
         );
-        _append('chmod exit: ${chmod.exitCode}');
-        if ((chmod.stdout as String).isNotEmpty) {
-          _append('chmod out: ${chmod.stdout}');
+
+        if (result.exitCode != 0) {
+          _append('Tar extraction error: ${result.stderr}');
         }
-        if ((chmod.stderr as String).isNotEmpty) {
-          _append('chmod err: ${chmod.stderr}');
-        }
-
-        // Ensure python3 itself is executable
-        await Process.run(
-          '/system/bin/sh',
-          ['-c', 'chmod 755 "$_pythonBin" 2>&1'],
-        );
-
-        // Verify: list the bin folder
-        final ls = await Process.run(
-          '/system/bin/sh',
-          ['-c', 'ls -la "$_pythonRoot/bin"'],
-        );
-        _append('--- bin listing ---');
-        _append(ls.stdout as String);
-
-        await versionFile.writeAsString(_extractVersion);
-      } else {
-        _append('Runtime already extracted ($_extractVersion).');
+        await tmpTar.delete();
+        await versionMarker.writeAsString('v3');
       }
 
       setState(() {
         _isSetupComplete = true;
         _status = 'Ready';
       });
-      _append('Python runtime ready at:');
-      _append(_pythonRoot!);
+      _append('Runtime ready.');
+      _append('Executable: $pythonExecutable');
+      _append('Stdlib: $_pythonStdlibDir');
     } catch (e, st) {
       _append('Setup failed: $e');
       _append(st.toString());
@@ -151,7 +122,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _runHello() async {
-    if (!_isSetupComplete || _pythonBin == null) return;
+    if (!_isSetupComplete || _nativeLibDir == null || _pythonStdlibDir == null) {
+      return;
+    }
 
     setState(() {
       _isRunning = true;
@@ -161,29 +134,24 @@ class _HomeScreenState extends State<HomeScreen> {
     _append('>>> Running hello.py');
     _append('');
 
-    final scriptFile = File('$_pythonRoot/hello.py');
+    final scriptFile = File('$_pythonStdlibDir/hello.py');
     await scriptFile.writeAsString('''
 print("Hello from Python on Android!")
 print("-" * 30)
-for i in range(1, 6):
-    print(f"Line {i}")
-print("-" * 30)
+import sys
+print(f"Python version: {sys.version}")
 print("S Code prototype: working.")
 ''');
 
     try {
-      // Run through sh with proper env variables
       final cmd = '''
-export PYTHONHOME="$_pythonRoot"
-export PYTHONPATH="$_pythonRoot/stdlib"
-export LD_LIBRARY_PATH="$_pythonRoot/lib"
-"$_pythonBin" "${scriptFile.path}"
+export PYTHONHOME="$_pythonStdlibDir/stdlib"
+export PYTHONPATH="$_pythonStdlibDir/stdlib"
+export LD_LIBRARY_PATH="$_nativeLibDir"
+"$_nativeLibDir/libpython3.so" "${scriptFile.path}"
 ''';
 
-      final result = await Process.run(
-        '/system/bin/sh',
-        ['-c', cmd],
-      );
+      final result = await Process.run('/system/bin/sh', ['-c', cmd]);
 
       _append('exit code: ${result.exitCode}');
       _append('');
@@ -226,40 +194,6 @@ export LD_LIBRARY_PATH="$_pythonRoot/lib"
     return Scaffold(
       appBar: AppBar(
         title: const Text('S Code'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Reinstall runtime',
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (_) => AlertDialog(
-                  title: const Text('Reinstall runtime?'),
-                  content: const Text('This re-extracts Python. Takes ~30s.'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Cancel'),
-                    ),
-                    FilledButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('Reinstall'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                final root = Directory(_pythonRoot!);
-                if (root.existsSync()) root.deleteSync(recursive: true);
-                setState(() {
-                  _isSetupComplete = false;
-                  _status = 'Reinstalling...';
-                });
-                _setupPython();
-              }
-            },
-          ),
-        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -280,10 +214,7 @@ export LD_LIBRARY_PATH="$_pythonRoot/lib"
                       ),
                     )
                   : const Icon(Icons.play_arrow_rounded),
-              label: Text(
-                _isRunning ? 'Running...' : 'Run hello.py',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
+              label: Text(_isRunning ? 'Running...' : 'Run hello.py'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF3FB950),
                 foregroundColor: const Color(0xFF0D1117),
@@ -316,7 +247,6 @@ export LD_LIBRARY_PATH="$_pythonRoot/lib"
   Widget _buildStatusBanner() {
     Color color;
     IconData icon;
-
     if (_isSetupComplete) {
       color = const Color(0xFF3FB950);
       icon = Icons.check_circle_outline;
@@ -327,7 +257,6 @@ export LD_LIBRARY_PATH="$_pythonRoot/lib"
       color = const Color(0xFFD29922);
       icon = Icons.hourglass_top;
     }
-
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
