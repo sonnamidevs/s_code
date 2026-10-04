@@ -55,7 +55,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _status = 'Preparing runtime...';
 
   String? _nativeLibDir;
-  String? _pythonStdlibDir;
+  String? _pythonRoot;
 
   @override
   void initState() {
@@ -73,30 +73,52 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       final docsDir = await getApplicationDocumentsDirectory();
-      _pythonStdlibDir = '${docsDir.path}/stdlib_extracted';
-      final stdlibDir = Directory(_pythonStdlibDir!);
+      _pythonRoot = '${docsDir.path}/python_runtime';
+      final root = Directory(_pythonRoot!);
 
       final wrapper = File('$_nativeLibDir/libpython3-exec.so');
       if (!wrapper.existsSync()) {
         throw Exception('Python wrapper not found in native library directory.');
       }
 
-      final versionMarker = File('${stdlibDir.path}/.extracted_v6');
+      final versionMarker = File('${root.path}/.extracted_v7');
       if (!versionMarker.existsSync()) {
-        setState(() => _status = 'Extracting Python standard library...');
-        if (stdlibDir.existsSync()) stdlibDir.deleteSync(recursive: true);
-        await stdlibDir.create(recursive: true);
+        setState(() => _status = 'Extracting Python runtime...');
+        if (root.existsSync()) root.deleteSync(recursive: true);
+        await root.create(recursive: true);
 
         final data = await rootBundle.load('assets/python/python-embed.tar.gz');
         final tmpTar = File('${docsDir.path}/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
-        await Process.run(
-          '/system/bin/sh',
-          ['-c', 'cd "${stdlibDir.path}" && tar -xzf "${tmpTar.path}" stdlib lib'],
-        );
+        // Extract to a temporary folder, then rearrange into
+        // Python's expected layout: <root>/lib/python3.14/
+        final script = '''
+cd "${root.path}"
+mkdir -p _tmp
+tar -xzf "${tmpTar.path}" -C _tmp
+mkdir -p lib
+if [ -d "_tmp/stdlib/python3.14" ]; then
+  mv "_tmp/stdlib/python3.14" "lib/python3.14"
+fi
+rm -rf _tmp
+ls -la lib/python3.14/encodings/__init__.py || echo "ENCODINGS_MISSING"
+''';
+
+        final result = await Process.run('/system/bin/sh', ['-c', script]);
+        _append('--- extract log ---');
+        _append(result.stdout as String);
+        if ((result.stderr as String).isNotEmpty) {
+          _append('extract stderr: ${result.stderr}');
+        }
         await tmpTar.delete();
-        await versionMarker.writeAsString('v6');
+
+        final encodingsCheck = File('${root.path}/lib/python3.14/encodings/__init__.py');
+        if (!encodingsCheck.existsSync()) {
+          throw Exception('encodings module missing after extraction');
+        }
+
+        await versionMarker.writeAsString('v7');
       }
 
       setState(() {
@@ -104,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _status = 'Ready';
       });
       _append('Runtime ready.');
+      _append('Root: $_pythonRoot');
     } catch (e, st) {
       _append('Setup failed: $e');
       _append(st.toString());
@@ -112,7 +135,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _runHello() async {
-    if (!_isSetupComplete || _nativeLibDir == null || _pythonStdlibDir == null) return;
+    if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) return;
 
     setState(() {
       _isRunning = true;
@@ -121,7 +144,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _append('>>> Running hello.py\n');
 
-    final scriptFile = File('$_pythonStdlibDir/hello.py');
+    final scriptFile = File('$_pythonRoot/hello.py');
     await scriptFile.writeAsString('''
 print("Hello from Python on Android!")
 import sys
@@ -130,11 +153,11 @@ print("S Code prototype: working.")
 ''');
 
     try {
-      // --- THE KEY FIX IS HERE ---
-      // PYTHONHOME must point to the version-specific stdlib folder.
+      // Python expects its stdlib at <PYTHONHOME>/lib/python3.14/
+      // Our folder now matches that, so PYTHONHOME can be the root.
       final cmd = '''
-export PYTHONHOME="$_pythonStdlibDir/stdlib/python3.14"
-export PYTHONPATH="$_pythonStdlibDir/stdlib/python3.14"
+export PYTHONHOME="$_pythonRoot"
+export PYTHONPATH="$_pythonRoot/lib/python3.14"
 export LD_LIBRARY_PATH="$_nativeLibDir"
 "$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"
 ''';
@@ -188,7 +211,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             ElevatedButton.icon(
               onPressed: _isSetupComplete && !_isRunning ? _runHello : null,
               icon: _isRunning
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF0D1117)))
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFF0D1117),
+                      ),
+                    )
                   : const Icon(Icons.play_arrow_rounded),
               label: Text(_isRunning ? 'Running...' : 'Run hello.py'),
               style: ElevatedButton.styleFrom(
@@ -197,11 +227,21 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                 disabledBackgroundColor: const Color(0xFF30363D),
                 disabledForegroundColor: const Color(0xFF8B949E),
                 padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
               ),
             ),
             const SizedBox(height: 20),
-            const Text('OUTPUT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.5, color: Color(0xFF8B949E))),
+            const Text(
+              'OUTPUT',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.5,
+                color: Color(0xFF8B949E),
+              ),
+            ),
             const SizedBox(height: 8),
             Expanded(child: _buildConsole()),
           ],
@@ -235,7 +275,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           Icon(icon, color: color, size: 20),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(_status, style: TextStyle(fontSize: 13, color: color, fontWeight: FontWeight.w500)),
+            child: Text(
+              _status,
+              style: TextStyle(
+                fontSize: 13,
+                color: color,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
         ],
       ),
@@ -253,10 +300,16 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       child: SingleChildScrollView(
         controller: _scrollController,
         child: Text(
-          _outputController.text.isEmpty ? 'Output will appear here...' : _outputController.text,
+          _outputController.text.isEmpty
+              ? 'Output will appear here...'
+              : _outputController.text,
           style: TextStyle(
-            fontFamily: 'monospace', fontSize: 13, height: 1.5,
-            color: _outputController.text.isEmpty ? const Color(0xFF484F58) : const Color(0xFFE6EDF3),
+            fontFamily: 'monospace',
+            fontSize: 13,
+            height: 1.5,
+            color: _outputController.text.isEmpty
+                ? const Color(0xFF484F58)
+                : const Color(0xFFE6EDF3),
           ),
         ),
       ),
