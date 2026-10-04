@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -45,8 +47,26 @@ jobs:
       - name: Rename APK
         run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/SCode.apk
 
-      - name: Upload APK
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact (backup)
         uses: actions/upload-artifact@v4
         with:
           name: SCode
           path: build/app/outputs/flutter-apk/SCode.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: S Code v${{ steps.version.outputs.VERSION }}
+          body: |
+            Automated build of S Code v${{ steps.version.outputs.VERSION }}.
+            Download SCode.apk below and install it on your Android phone.
+          files: build/app/outputs/flutter-apk/SCode.apk
+          draft: false
+          prerelease: false
