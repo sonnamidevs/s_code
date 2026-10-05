@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class TerminalScreen extends StatefulWidget {
   final String? pythonRoot;
@@ -23,15 +24,14 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   late String _cwd;
   bool _isRunning = false;
+  bool _ctrlActive = false;
 
   @override
   void initState() {
     super.initState();
     _cwd = widget.pythonRoot ?? '/';
-    _write('PyIDE Terminal');
-    _write('Working directory: $_cwd');
-    _write('Type a command and press Enter.');
-    _write('─' * 40);
+    _write('\$ pwd');
+    _write(_cwd);
   }
 
   void _write(String text) {
@@ -47,28 +47,51 @@ class _TerminalScreenState extends State<TerminalScreen> {
     });
   }
 
+  // Build a proper environment for /system/bin/sh
+  Map<String, String> _buildEnv() {
+    // Base Android system PATH — critical so ls, cat, etc. work
+    const systemPath =
+        '/system/bin:/system/xbin:/vendor/bin:/product/bin';
+
+    final env = <String, String>{
+      'PATH': systemPath,
+      'HOME': '/',
+      'TERM': 'xterm-256color',
+      'LANG': 'en_US.UTF-8',
+    };
+
+    if (widget.pythonRoot != null && widget.nativeLibDir != null) {
+      env['PYTHONHOME'] = widget.pythonRoot!;
+      env['PYTHONPATH'] = '${widget.pythonRoot}/lib/python3.14';
+      env['LD_LIBRARY_PATH'] = widget.nativeLibDir!;
+      env['PATH'] =
+          '${widget.pythonRoot}/bin:${widget.nativeLibDir}:$systemPath';
+    }
+
+    return env;
+  }
+
   Future<void> _runCommand(String raw) async {
     final cmd = raw.trim();
-    if (cmd.isEmpty) return;
+    if (cmd.isEmpty) {
+      _write('\$');
+      return;
+    }
 
     setState(() => _isRunning = true);
     _write('\$ $cmd');
 
-    // Built-in: cd
+    // cd handled natively
     if (cmd == 'cd' || cmd.startsWith('cd ')) {
       final parts = cmd.split(' ');
       final target = parts.length > 1 ? parts.sublist(1).join(' ') : '/';
-      final newPath = target.startsWith('/')
-          ? target
-          : '$_cwd/$target';
+      final newPath = target.startsWith('/') ? target : '$_cwd/$target';
       final dir = Directory(newPath);
       if (await dir.exists()) {
         try {
           _cwd = dir.resolveSymbolicLinksSync();
-          _write('Changed to $_cwd');
         } catch (_) {
           _cwd = newPath;
-          _write('Changed to $_cwd');
         }
       } else {
         _write('cd: no such directory: $target');
@@ -77,7 +100,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
       return;
     }
 
-    // Built-in: clear
     if (cmd == 'clear') {
       setState(() {
         _historyController.clear();
@@ -86,26 +108,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
       return;
     }
 
-    // Everything else: run in a shell
     try {
-      final env = <String, String>{
-        'HOME': Platform.environment['HOME'] ?? '/',
-        'PATH': '/system/bin:/system/xbin',
-        'TERM': 'xterm-256color',
-      };
-      if (widget.pythonRoot != null && widget.nativeLibDir != null) {
-        env['PYTHONHOME'] = widget.pythonRoot!;
-        env['PYTHONPATH'] = '${widget.pythonRoot}/lib/python3.14';
-        env['LD_LIBRARY_PATH'] = widget.nativeLibDir!;
-        env['PATH'] =
-            '${widget.pythonRoot}/bin:${widget.nativeLibDir}:\${PATH}';
-      }
-
       final result = await Process.run(
         '/system/bin/sh',
         ['-c', cmd],
         workingDirectory: _cwd,
-        environment: env,
+        environment: _buildEnv(),
+        includeParentEnvironment: true,
       );
 
       final out = (result.stdout as String).trimRight();
@@ -113,14 +122,27 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
       if (out.isNotEmpty) _write(out);
       if (err.isNotEmpty) _write(err);
-      if (out.isEmpty && err.isEmpty && result.exitCode != 0) {
-        _write('[exit code ${result.exitCode}]');
-      }
     } catch (e) {
       _write('Error: $e');
     } finally {
       setState(() => _isRunning = false);
     }
+  }
+
+  void _insertKey(String text) {
+    final sel = _inputController.selection;
+    final value = _inputController.text;
+    if (!sel.isValid) {
+      _inputController.text = value + text;
+      _inputController.selection =
+          TextSelection.collapsed(offset: _inputController.text.length);
+      return;
+    }
+    final newText = value.replaceRange(sel.start, sel.end, text);
+    _inputController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: sel.start + text.length),
+    );
   }
 
   @override
@@ -134,115 +156,195 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final viewInsets = MediaQuery.of(context).viewInsets.bottom;
     return Scaffold(
-      backgroundColor: const Color(0xFF161616),
+      backgroundColor: const Color(0xFF000000),
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1E1E1E),
-        iconTheme: const IconThemeData(color: Color(0xFFD4D4D4)),
+        backgroundColor: const Color(0xFF0E0E0E),
+        elevation: 0,
+        toolbarHeight: 42,
+        iconTheme: const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
         title: const Text('Terminal',
-            style: TextStyle(fontSize: 15, color: Color(0xFFD4D4D4))),
+            style: TextStyle(
+                fontSize: 12.5,
+                color: Color(0xFFCCCCCC),
+                fontWeight: FontWeight.w400)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.cleaning_services_outlined,
-                color: Color(0xFFCCCCCC), size: 18),
-            onPressed: () {
-              setState(() => _historyController.clear());
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.arrow_upward,
-                color: Color(0xFFCCCCCC), size: 18),
-            onPressed: () {
-              Navigator.pop(context);
-            },
+            icon: const Icon(Icons.delete_outline, size: 16),
+            onPressed: () => setState(() => _historyController.clear()),
           ),
         ],
       ),
       body: SafeArea(
-        child: Column(
+        bottom: false,
+        child: Stack(
           children: [
-            Expanded(
-              child: GestureDetector(
-                onTap: () => _inputFocus.requestFocus(),
-                behavior: HitTestBehavior.opaque,
-                child: SingleChildScrollView(
-                  controller: _scroll,
-                  padding: const EdgeInsets.all(10),
-                  child: Text(
-                    _historyController.text,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                      height: 1.5,
-                      color: Color(0xFFD4D4D4),
+            Column(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => _inputFocus.requestFocus(),
+                    behavior: HitTestBehavior.opaque,
+                    child: SingleChildScrollView(
+                      controller: _scroll,
+                      padding: const EdgeInsets.all(10),
+                      child: Text(
+                        _historyController.text,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11.5,
+                          height: 1.45,
+                          color: Color(0xFFCCCCCC),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-            Container(
-              color: const Color(0xFF252526),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Text(
-                    '\$',
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 13,
-                      color: const Color(0xFF3FB950),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: TextField(
-                      controller: _inputController,
-                      focusNode: _inputFocus,
-                      autofocus: false,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12.5,
-                        color: Color(0xFFD4D4D4),
-                      ),
-                      decoration: const InputDecoration(
-                        border: InputBorder.none,
-                        isDense: true,
-                        hintText: 'type a command…',
-                        hintStyle: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12.5,
-                          color: Color(0xFF5A5A5A),
+                // Input row
+                Container(
+                  color: const Color(0xFF0E0E0E),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  child: Row(
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text(
+                          '\$',
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF3FB950),
+                          ),
                         ),
                       ),
-                      onSubmitted: (v) {
-                        _inputController.clear();
-                        _runCommand(v);
-                      },
-                    ),
+                      Expanded(
+                        child: TextField(
+                          controller: _inputController,
+                          focusNode: _inputFocus,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            color: Color(0xFFCCCCCC),
+                          ),
+                          cursorColor: const Color(0xFF3FB950),
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(vertical: 8),
+                          ),
+                          onSubmitted: (v) {
+                            _inputController.clear();
+                            _runCommand(v);
+                          },
+                        ),
+                      ),
+                      if (_isRunning)
+                        const Padding(
+                          padding: EdgeInsets.all(6),
+                          child: SizedBox(
+                            width: 13,
+                            height: 13,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 1.6,
+                                color: Color(0xFF3FB950)),
+                          ),
+                        )
+                      else
+                        IconButton(
+                          icon: const Icon(Icons.arrow_upward,
+                              size: 16, color: Color(0xFF3FB950)),
+                          onPressed: () {
+                            final v = _inputController.text;
+                            _inputController.clear();
+                            _runCommand(v);
+                          },
+                        ),
+                    ],
                   ),
-                  if (_isRunning)
-                    const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Color(0xFF4A9EFF)),
-                    )
-                  else
-                    IconButton(
-                      icon: const Icon(Icons.send,
-                          size: 16, color: Color(0xFF4A9EFF)),
-                      onPressed: () {
-                        final v = _inputController.text;
-                        _inputController.clear();
-                        _runCommand(v);
-                      },
-                    ),
-                ],
+                ),
+              ],
+            ),
+            // Special keys row (float above keyboard)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: viewInsets,
+              child: Container(
+                height: 38,
+                color: const Color(0xFF0E0E0E),
+                child: Row(
+                  children: [
+                    _key('ESC', () => _insertKey('\u001b')),
+                    _key('TAB', () => _insertKey('    ')),
+                    _modKey('CTRL', _ctrlActive, () {
+                      setState(() => _ctrlActive = !_ctrlActive);
+                    }),
+                    _modKey('ALT', false, () {}),
+                    _key('-', () => _insertKey('-')),
+                    _key('/', () => _insertKey('/')),
+                    _key('|', () => _insertKey('|')),
+                    _key('~', () => _insertKey('~')),
+                    _key('>', () => _insertKey('>')),
+                    _key('<', () => _insertKey('<')),
+                  ],
+                ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _key(String label, VoidCallback onTap) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Center(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 11.5,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFFCCCCCC),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modKey(String label, bool active, VoidCallback onTap) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Center(
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: active
+                  ? const Color(0xFF3FB950).withOpacity(0.25)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+                color: active
+                    ? const Color(0xFF3FB950)
+                    : const Color(0xFFAAAAAA),
+              ),
+            ),
+          ),
         ),
       ),
     );

@@ -55,18 +55,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF1E1E1E),
+      backgroundColor: const Color(0xFF1A1A1A),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1E1E1E),
-        iconTheme: const IconThemeData(color: Color(0xFFD4D4D4)),
-        title: const Text('Settings',
-            style: TextStyle(fontSize: 16, color: Color(0xFFD4D4D4))),
+        backgroundColor: const Color(0xFF1A1A1A),
         elevation: 0,
+        toolbarHeight: 42,
+        iconTheme:
+            const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
+        title: const Text('Settings',
+            style: TextStyle(
+                fontSize: 12.5,
+                color: Color(0xFFCCCCCC),
+                fontWeight: FontWeight.w400)),
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 32),
         children: [
-          _sectionHeader('EDITOR'),
+          _hdr('EDITOR'),
           _card(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -74,40 +79,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Row(
                   children: [
                     const Icon(Icons.text_fields,
-                        size: 18, color: Color(0xFF4A9EFF)),
+                        size: 15, color: Color(0xFF4A9EFF)),
                     const SizedBox(width: 10),
                     const Text('Font size',
-                        style: TextStyle(fontSize: 14, color: Color(0xFFD4D4D4))),
+                        style: TextStyle(
+                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
                     const Spacer(),
-                    Text('${_size.toStringAsFixed(0)} pt',
+                    Text('${_size.toStringAsFixed(1)} pt',
                         style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
                           color: Color(0xFF4A9EFF),
                         )),
                   ],
                 ),
-                Slider(
-                  value: _size,
-                  min: 10,
-                  max: 28,
-                  divisions: 18,
-                  activeColor: const Color(0xFF4A9EFF),
-                  inactiveColor: const Color(0xFF3A3A3A),
-                  onChanged: (v) {
-                    setState(() => _size = v);
-                    widget.onFontSizeChanged(v);
-                    _persist();
-                  },
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    thumbShape: const RoundSliderThumbShape(
+                        enabledThumbRadius: 7),
+                  ),
+                  child: Slider(
+                    value: _size,
+                    min: 9,
+                    max: 24,
+                    divisions: 30,
+                    activeColor: const Color(0xFF4A9EFF),
+                    inactiveColor: const Color(0xFF2A2A2A),
+                    onChanged: (v) {
+                      setState(() => _size = v);
+                      widget.onFontSizeChanged(v);
+                      _persist();
+                    },
+                  ),
                 ),
-                const Divider(color: Color(0xFF2D2D30), height: 24),
+                const Divider(color: Color(0xFF2A2A2A), height: 20),
                 Row(
                   children: [
                     const Icon(Icons.format_list_numbered,
-                        size: 18, color: Color(0xFF4A9EFF)),
+                        size: 15, color: Color(0xFF4A9EFF)),
                     const SizedBox(width: 10),
-                    const Text('Show line numbers',
-                        style: TextStyle(fontSize: 14, color: Color(0xFFD4D4D4))),
+                    const Text('Line numbers',
+                        style: TextStyle(
+                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
                     const Spacer(),
                     Switch(
                       value: _showLineNumbers,
@@ -123,7 +137,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          _sectionHeader('THEME'),
+          _hdr('THEME'),
           _card(
             padding: EdgeInsets.zero,
             child: Column(
@@ -137,32 +151,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 14),
+                        horizontal: 14, vertical: 12),
                     child: Row(
                       children: [
                         Container(
-                          width: 20,
-                          height: 20,
+                          width: 16,
+                          height: 16,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             border: Border.all(
                               color: active
                                   ? const Color(0xFF4A9EFF)
                                   : const Color(0xFF3A3A3A),
-                              width: 2,
+                              width: 1.8,
                             ),
                           ),
                           child: active
                               ? const Center(
                                   child: Icon(Icons.check,
-                                      size: 12, color: Color(0xFF4A9EFF)),
+                                      size: 10, color: Color(0xFF4A9EFF)),
                                 )
                               : null,
                         ),
                         const SizedBox(width: 14),
                         Text(t['name']!,
                             style: const TextStyle(
-                                fontSize: 14, color: Color(0xFFD4D4D4))),
+                                fontSize: 12.5,
+                                color: Color(0xFFCCCCCC))),
                       ],
                     ),
                   ),
@@ -170,7 +185,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               }).toList(),
             ),
           ),
-          _sectionHeader('ABOUT'),
+          _hdr('ABOUT'),
           _card(
             child: InkWell(
               onTap: () => Navigator.push(
@@ -178,30 +193,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 MaterialPageRoute(builder: (_) => const AboutScreen()),
               ),
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Row(
                   children: [
                     const Icon(Icons.info_outline,
-                        size: 18, color: Color(0xFF4A9EFF)),
+                        size: 15, color: Color(0xFF4A9EFF)),
                     const SizedBox(width: 10),
                     const Text('About PyIDE',
-                        style: TextStyle(fontSize: 14, color: Color(0xFFD4D4D4))),
+                        style: TextStyle(
+                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
                     const Spacer(),
                     const Icon(Icons.chevron_right,
-                        size: 20, color: Color(0xFF6A6A6A)),
+                        size: 18, color: Color(0xFF6A6A6A)),
                   ],
                 ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 30),
-          Center(
-            child: Text(
-              'PyIDE · Sonnami Develops · v0.2.0',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF5A5A5A),
-                letterSpacing: 0.5,
               ),
             ),
           ),
@@ -210,23 +215,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _sectionHeader(String title) => Padding(
-        padding: const EdgeInsets.fromLTRB(4, 20, 0, 10),
+  Widget _hdr(String title) => Padding(
+        padding: const EdgeInsets.fromLTRB(6, 18, 0, 8),
         child: Text(
           title,
           style: const TextStyle(
-            fontSize: 11,
+            fontSize: 9.5,
             letterSpacing: 1.5,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF888888),
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF7A7A7A),
           ),
         ),
       );
 
   Widget _card({required Widget child, EdgeInsets? padding}) => Container(
-        padding: padding ?? const EdgeInsets.all(16),
+        padding: padding ?? const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: const Color(0xFF252526),
+          color: const Color(0xFF202020),
           borderRadius: BorderRadius.circular(10),
         ),
         child: child,

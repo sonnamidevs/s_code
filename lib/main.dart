@@ -34,14 +34,8 @@ class PyIDEApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF1E1E1E),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF4A9EFF),
-          secondary: Color(0xFF3FB950),
-          surface: Color(0xFF252526),
-          onSurface: Color(0xFFD4D4D4),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF1E1E1E),
-          elevation: 0,
-          centerTitle: false,
+          surface: Color(0xFF1E1E1E),
+          onSurface: Color(0xFFCCCCCC),
         ),
       ),
       home: const MainScaffold(),
@@ -70,7 +64,6 @@ class _MainScaffoldState extends State<MainScaffold> {
   bool _isSetupComplete = false;
   bool _isRunning = false;
   bool _hasError = false;
-  String _statusMessage = 'Preparing...';
   String? _nativeLibDir;
   String? _pythonRoot;
 
@@ -82,16 +75,15 @@ class _MainScaffoldState extends State<MainScaffold> {
   final List<EditorTabData> _tabs = [];
   int _activeTab = 0;
 
-  double _fontSize = 13;
+  double _fontSize = 12.5;
   String _themeName = 'atom-one-dark';
-  double _consoleFraction = 0.32;
+  double _consoleFraction = 0.30;
   bool _showConsole = true;
   bool _showSpecialKeys = false;
   bool _ctrlActive = false;
   bool _shiftActive = false;
   bool _altActive = false;
   int _sidebarIndex = 0;
-  int _lastHighlightedLine = -1;
 
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _outputScroll = ScrollController();
@@ -109,7 +101,6 @@ class _MainScaffoldState extends State<MainScaffold> {
       _themes[_themeName] ?? atomOneDarkTheme;
 
   static const String _welcomeCode = '''# Welcome to PyIDE
-# A real Python editor for Android.
 
 import sys
 import platform
@@ -143,25 +134,13 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _fontSize = p.getDouble('font_size') ?? 13.0;
+      _fontSize = p.getDouble('font_size') ?? 12.5;
       _themeName = p.getString('theme') ?? 'atom-one-dark';
       _showLineNumbers = p.getBool('show_line_numbers') ?? true;
     });
   }
 
-  // ================= CONTROLLER LISTENER (auto-indent + line highlight) =====
   void _onControllerChanged() {
-    // Line highlight
-    final pos = _codeController.selection.baseOffset;
-    if (pos >= 0 && pos <= _codeController.text.length) {
-      final line =
-          '\n'.allMatches(_codeController.text.substring(0, pos)).length;
-      if (line != _lastHighlightedLine) {
-        _lastHighlightedLine = line;
-      }
-    }
-
-    // Auto-indent
     if (_isAutoIndenting) return;
     final value = _codeController.value;
     final text = value.text;
@@ -193,16 +172,12 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     }
   }
 
-  // ================= PYTHON SETUP =================
   Future<void> _setupPython() async {
     try {
-      setState(() {
-        _statusMessage = 'Locating...';
-        _hasError = false;
-      });
+      setState(() => _hasError = false);
       _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
       if (_nativeLibDir == null || _nativeLibDir!.isEmpty) {
-        throw Exception('Native library directory unavailable');
+        throw Exception('Native dir unavailable');
       }
 
       final docsDir = await getApplicationDocumentsDirectory();
@@ -214,7 +189,6 @@ print(f"2 + 3 = {calc.add(2, 3)}")
 
       final marker = File('${root.path}/.extracted_v7');
       if (!marker.existsSync()) {
-        setState(() => _statusMessage = 'Extracting Python runtime...');
         if (root.existsSync()) root.deleteSync(recursive: true);
         await root.create(recursive: true);
 
@@ -235,28 +209,20 @@ rm -rf _tmp
         await Process.run('/system/bin/sh', ['-c', script]);
         await tmpTar.delete();
 
-        final check =
-            File('${root.path}/lib/python3.14/encodings/__init__.py');
-        if (!check.existsSync()) {
+        if (!File('${root.path}/lib/python3.14/encodings/__init__.py')
+            .existsSync()) {
           throw Exception('encodings missing');
         }
         await marker.writeAsString('v7');
       }
 
-      setState(() {
-        _isSetupComplete = true;
-        _statusMessage = 'Ready';
-      });
+      setState(() => _isSetupComplete = true);
     } catch (e) {
-      setState(() {
-        _hasError = true;
-        _statusMessage = 'Setup failed';
-      });
+      setState(() => _hasError = true);
       _append('Setup failed: $e');
     }
   }
 
-  // ================= RUN =================
   Future<void> _runCode() async {
     if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) {
       return;
@@ -268,7 +234,7 @@ rm -rf _tmp
     });
 
     _append('');
-    _append('▶ ${DateTime.now().toString().substring(11, 19)} — Running');
+    _append('▶ ${DateTime.now().toString().substring(11, 19)}');
     _append('─' * 40);
 
     final scriptFile = File('$_pythonRoot/script.py');
@@ -286,11 +252,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         _append(result.stdout as String);
       }
       if ((result.stderr as String).isNotEmpty) {
-        _append('--- stderr ---');
         _append(result.stderr as String);
       }
       _append('─' * 40);
-      _append('Exit ${result.exitCode}  ${result.exitCode == 0 ? "✓" : "✗"}');
+      _append('[Done] exit ${result.exitCode}');
     } catch (e) {
       _append('Run error: $e');
     } finally {
@@ -304,7 +269,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       if (_outputScroll.hasClients) {
         _outputScroll.animateTo(
           _outputScroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
+          duration: const Duration(milliseconds: 150),
           curve: Curves.easeOut,
         );
       }
@@ -328,7 +293,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _editorFocus.requestFocus();
   }
 
-  // ================= TABS =================
   void _switchTab(int i) {
     if (i == _activeTab) return;
     _tabs[_activeTab].content = _codeController.text;
@@ -365,20 +329,22 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _tabs[_activeTab].content = _codeController.text;
     final targetPath = _tabs[_activeTab].path ??
         '$_pythonRoot/${_tabs[_activeTab].name}';
-    final f = File(targetPath);
-    await f.writeAsString(_tabs[_activeTab].content);
+    await File(targetPath).writeAsString(_tabs[_activeTab].content);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Saved ${_tabs[_activeTab].name}'),
+          content: Text('Saved ${_tabs[_activeTab].name}',
+              style: const TextStyle(fontSize: 12)),
           duration: const Duration(seconds: 1),
-          backgroundColor: const Color(0xFF252526),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF2A2A2A),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8)),
         ),
       );
     }
   }
 
-  // ================= OPEN FILE FROM DEVICE =================
   Future<void> _openFileFromDevice() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -391,28 +357,26 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       final name = path.split('/').last;
       _tabs[_activeTab].content = _codeController.text;
       setState(() {
-        _tabs.add(
-            EditorTabData(name: name, content: content, path: path));
+        _tabs.add(EditorTabData(name: name, content: content, path: path));
         _activeTab = _tabs.length - 1;
       });
       _codeController.text = content;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open file: $e')),
+          SnackBar(content: Text('Could not open: $e')),
         );
       }
     }
   }
 
-  // ================= MENU =================
-  Future<void> _handleMenu(String v) async {
+  void _handleMenu(String v) async {
     switch (v) {
       case 'new':
         _newFile();
         break;
       case 'files':
-        await _openFileFromDevice();
+        _openFileFromDevice();
         break;
       case 'save':
         await _saveCurrentFile();
@@ -421,10 +385,31 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         _closeTab(_activeTab);
         break;
       case 'terminal':
-        _openTerminal();
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => TerminalScreen(
+              pythonRoot: _pythonRoot,
+              nativeLibDir: _nativeLibDir,
+            ),
+          ),
+        );
         break;
       case 'settings':
-        _openSettings();
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => SettingsScreen(
+              initialFontSize: _fontSize,
+              initialTheme: _themeName,
+              initialShowLineNumbers: _showLineNumbers,
+              onFontSizeChanged: (v) => setState(() => _fontSize = v),
+              onThemeChanged: (k) => setState(() => _themeName = k),
+              onLineNumbersChanged: (v) =>
+                  setState(() => _showLineNumbers = v),
+            ),
+          ),
+        );
         break;
       case 'about':
         Navigator.push(
@@ -432,69 +417,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           MaterialPageRoute(builder: (_) => const AboutScreen()),
         );
         break;
-      case 'help':
-        _showHelp();
-        break;
       case 'exit':
         SystemNavigator.pop();
         break;
     }
-  }
-
-  void _openTerminal() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => TerminalScreen(
-          pythonRoot: _pythonRoot,
-          nativeLibDir: _nativeLibDir,
-        ),
-      ),
-    );
-  }
-
-  void _showHelp() {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF252526),
-        title: const Text('PyIDE — Help',
-            style: TextStyle(color: Color(0xFFD4D4D4), fontSize: 15)),
-        content: const Text(
-          '• Run: ▶ icon in the app bar\n'
-          '• Save: pencil icon\n'
-          '• Files: tap ⋮ → Files\n'
-          '• Terminal: tap ⋮ → Terminal\n'
-          '• Resize console: drag the handle\n'
-          '• Special keys: long-press the ▲ button\n'
-          '• Toggle console: tap the ▲ button',
-          style: TextStyle(
-              height: 1.6, color: Color(0xFFCCCCCC), fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _openSettings() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SettingsScreen(
-          initialFontSize: _fontSize,
-          initialTheme: _themeName,
-          initialShowLineNumbers: _showLineNumbers,
-          onFontSizeChanged: (v) => setState(() => _fontSize = v),
-          onThemeChanged: (k) => setState(() => _themeName = k),
-          onLineNumbersChanged: (v) => setState(() => _showLineNumbers = v),
-        ),
-      ),
-    );
   }
 
   @override
@@ -507,7 +433,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     super.dispose();
   }
 
-  // ================= BUILD =================
   @override
   Widget build(BuildContext context) {
     final viewInsets = MediaQuery.of(context).viewInsets.bottom;
@@ -515,8 +440,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       key: _scaffoldKey,
       resizeToAvoidBottomInset: false,
       drawer: Drawer(
-        backgroundColor: const Color(0xFF1E1E1E),
-        width: MediaQuery.of(context).size.width * 0.82,
+        backgroundColor: const Color(0xFF1A1A1A),
+        width: MediaQuery.of(context).size.width * 0.76,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.only(
+            topRight: Radius.circular(14),
+            bottomRight: Radius.circular(14),
+          ),
+        ),
         child: SidebarContent(
           activeIndex: _sidebarIndex,
           onIndexChanged: (i) => setState(() => _sidebarIndex = i),
@@ -528,33 +459,29 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           },
         ),
       ),
-      appBar: _buildAppBar(),
+      appBar: _appBar(),
       body: SafeArea(
         bottom: false,
         child: Stack(
           children: [
             Column(
               children: [
-                _buildFileTabs(),
+                _tabsBar(),
                 Expanded(
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final total = constraints.maxHeight;
-                      final consoleH = (_showConsole
-                              ? total * _consoleFraction
-                              : 0)
-                          .toDouble();
-                      final editorH = total -
-                          consoleH -
-                          (_showConsole ? 12 : 0);
-
+                      final consoleH =
+                          (_showConsole ? total * _consoleFraction : 0)
+                              .toDouble();
+                      final editorH =
+                          total - consoleH - (_showConsole ? 10 : 0);
                       return Column(
                         children: [
-                          SizedBox(height: editorH, child: _buildEditor()),
-                          if (_showConsole) _buildDragHandle(total),
+                          SizedBox(height: editorH, child: _editor()),
+                          if (_showConsole) _dragHandle(total),
                           if (_showConsole)
-                            SizedBox(
-                                height: consoleH, child: _buildConsole()),
+                            SizedBox(height: consoleH, child: _console()),
                         ],
                       );
                     },
@@ -562,176 +489,176 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                 ),
               ],
             ),
-            // Special keys — floats above the keyboard
             if (_showSpecialKeys)
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: viewInsets,
-                child: _buildSpecialKeysBar(),
+                child: _specialKeysBar(),
               ),
           ],
         ),
       ),
-      floatingActionButton: _buildFAB(),
+      floatingActionButton: _fab(),
     );
   }
 
-  // ================= APP BAR =================
-  PreferredSizeWidget _buildAppBar() {
+  PreferredSizeWidget _appBar() {
     return AppBar(
-      backgroundColor: const Color(0xFF1E1E1E),
-      toolbarHeight: 48,
+      backgroundColor: const Color(0xFF1A1A1A),
+      toolbarHeight: 42,
+      elevation: 0,
+      leadingWidth: 42,
       leading: IconButton(
-        icon: const Icon(Icons.menu, color: Color(0xFFCCCCCC), size: 20),
+        icon: const Icon(Icons.menu, size: 17, color: Color(0xFFAAAAAA)),
+        splashRadius: 20,
+        padding: EdgeInsets.zero,
         onPressed: () => _scaffoldKey.currentState?.openDrawer(),
       ),
       titleSpacing: 0,
-      title: Row(
-        children: [
-          if (!_isSetupComplete && !_hasError)
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: SizedBox(
-                width: 10,
-                height: 10,
-                child: CircularProgressIndicator(
-                    strokeWidth: 1.5, color: Color(0xFFD29922)),
-              ),
-            ),
-          if (_hasError)
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(right: 8),
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFFF85149),
-              ),
-            ),
-          Flexible(
-            child: Text(
-              _tabs[_activeTab].name,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w500,
-                color: Color(0xFFD4D4D4),
-              ),
-            ),
-          ),
-        ],
+      title: Text(
+        _tabs[_activeTab].name,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          fontSize: 12.5,
+          fontWeight: FontWeight.w400,
+          color: Color(0xFFCCCCCC),
+          letterSpacing: 0,
+        ),
       ),
       actions: [
         IconButton(
           icon: const Icon(Icons.edit_outlined,
-              color: Color(0xFFCCCCCC), size: 18),
+              size: 16, color: Color(0xFFAAAAAA)),
+          splashRadius: 20,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
           onPressed: _saveCurrentFile,
-          tooltip: 'Save',
         ),
         IconButton(
           icon: _isRunning
               ? const SizedBox(
-                  width: 16,
-                  height: 16,
+                  width: 14,
+                  height: 14,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Color(0xFF4A9EFF)),
+                      strokeWidth: 1.6, color: Color(0xFF4A9EFF)),
                 )
               : const Icon(Icons.play_arrow_rounded,
-                  color: Color(0xFF4A9EFF), size: 24),
+                  size: 20, color: Color(0xFF4A9EFF)),
+          splashRadius: 20,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
           onPressed: _isSetupComplete && !_isRunning ? _runCode : null,
-          tooltip: 'Run',
         ),
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert,
-              color: Color(0xFFCCCCCC), size: 18),
-          color: const Color(0xFF2D2D30),
+              size: 17, color: Color(0xFFAAAAAA)),
+          splashRadius: 20,
+          padding: EdgeInsets.zero,
+          iconSize: 17,
+          color: const Color(0xFF252525),
+          elevation: 6,
+          offset: const Offset(0, 42),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: const BorderSide(color: Color(0xFF2E2E2E), width: 1),
+          ),
+          padding: EdgeInsets.zero,
           onSelected: _handleMenu,
-          itemBuilder: (_) => const [
-            PopupMenuItem(
-                value: 'new',
-                child: _MenuRow(Icons.add, 'New file')),
-            PopupMenuItem(
-                value: 'files',
-                child: _MenuRow(Icons.folder_open, 'Files')),
-            PopupMenuItem(
-                value: 'save',
-                child: _MenuRow(Icons.save_outlined, 'Save')),
-            PopupMenuItem(
-                value: 'close',
-                child: _MenuRow(Icons.close, 'Close file')),
-            PopupMenuDivider(),
-            PopupMenuItem(
-                value: 'terminal',
-                child: _MenuRow(Icons.terminal, 'Terminal')),
-            PopupMenuDivider(),
-            PopupMenuItem(
-                value: 'settings',
-                child: _MenuRow(Icons.settings_outlined, 'Settings')),
-            PopupMenuItem(
-                value: 'about',
-                child: _MenuRow(Icons.info_outline, 'About')),
-            PopupMenuItem(
-                value: 'help',
-                child: _MenuRow(Icons.help_outline, 'Help')),
-            PopupMenuDivider(),
-            PopupMenuItem(
-                value: 'exit',
-                child: _MenuRow(Icons.logout, 'Exit')),
+          itemBuilder: (_) => [
+            _mi('new', Icons.note_add_outlined, 'New file'),
+            _mi('files', Icons.folder_open_outlined, 'Files'),
+            _mi('save', Icons.save_outlined, 'Save'),
+            _mi('close', Icons.close, 'Close file'),
+            _divider(),
+            _mi('terminal', Icons.terminal_outlined, 'Terminal'),
+            _divider(),
+            _mi('settings', Icons.settings_outlined, 'Settings'),
+            _mi('about', Icons.info_outline, 'About'),
+            _divider(),
+            _mi('exit', Icons.logout_outlined, 'Exit'),
           ],
         ),
+        const SizedBox(width: 4),
       ],
     );
   }
 
-  // ================= FILE TABS =================
-  Widget _buildFileTabs() {
+  PopupMenuItem<String> _mi(String v, IconData i, String label) {
+    return PopupMenuItem<String>(
+      value: v,
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      child: Row(
+        children: [
+          Icon(i, size: 15, color: const Color(0xFFAAAAAA)),
+          const SizedBox(width: 14),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w400,
+              color: Color(0xFFCCCCCC),
+              letterSpacing: 0,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  PopupMenuDivider _divider() =>
+      const PopupMenuDivider(height: 1, color: Color(0xFF2A2A2A));
+
+  Widget _tabsBar() {
     return Container(
-      height: 33,
-      color: const Color(0xFF252526),
+      height: 30,
+      color: const Color(0xFF1A1A1A),
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
         itemCount: _tabs.length,
         itemBuilder: (_, i) {
           final active = i == _activeTab;
-          return GestureDetector(
-            onTap: () => _switchTab(i),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 11),
-              decoration: BoxDecoration(
-                color: active
-                    ? const Color(0xFF1E1E1E)
-                    : const Color(0xFF2D2D30),
-                border: Border(
-                  bottom: BorderSide(
-                    color: active
-                        ? const Color(0xFF4A9EFF)
-                        : Colors.transparent,
-                    width: 2,
-                  ),
+          return Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: GestureDetector(
+              onTap: () => _switchTab(i),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: active
+                      ? const Color(0xFF252525)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
                 ),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.description_outlined,
-                      size: 12, color: Color(0xFF4A9EFF)),
-                  const SizedBox(width: 6),
-                  Text(
-                    _tabs[i].name,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: active
-                          ? const Color(0xFFD4D4D4)
-                          : const Color(0xFF888888),
+                child: Row(
+                  children: [
+                    Icon(Icons.description_outlined,
+                        size: 11,
+                        color: active
+                            ? const Color(0xFF4A9EFF)
+                            : const Color(0xFF666666)),
+                    const SizedBox(width: 6),
+                    Text(
+                      _tabs[i].name,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w400,
+                        color: active
+                            ? const Color(0xFFCCCCCC)
+                            : const Color(0xFF7A7A7A),
+                        letterSpacing: 0,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: () => _closeTab(i),
-                    child: const Icon(Icons.close,
-                        size: 12, color: Color(0xFF888888)),
-                  ),
-                ],
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: () => _closeTab(i),
+                      child: const Icon(Icons.close,
+                          size: 11, color: Color(0xFF666666)),
+                    ),
+                  ],
+                ),
               ),
             ),
           );
@@ -740,8 +667,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= EDITOR =================
-  Widget _buildEditor() {
+  Widget _editor() {
     return Container(
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
@@ -757,13 +683,13 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             height: 1.5,
           ),
           gutterStyle: GutterStyle(
-            width: _showLineNumbers ? 40 : 0,
+            width: _showLineNumbers ? 34 : 0,
             showLineNumbers: _showLineNumbers,
             showErrors: false,
             showFoldingHandles: _showLineNumbers,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize - 0.5,
+              fontSize: _fontSize - 1,
               height: 1.5,
               color: const Color(0xFF5C6370),
             ),
@@ -773,8 +699,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= DRAG HANDLE =================
-  Widget _buildDragHandle(double total) {
+  Widget _dragHandle(double total) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onVerticalDragUpdate: (d) {
@@ -789,14 +714,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         });
       },
       child: Container(
-        height: 12,
-        color: const Color(0xFF1E1E1E),
+        height: 10,
+        color: const Color(0xFF1A1A1A),
         child: Center(
           child: Container(
-            width: 40,
+            width: 30,
             height: 3,
             decoration: BoxDecoration(
-              color: const Color(0xFF5A5A5A),
+              color: const Color(0xFF444444),
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -805,35 +730,33 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= CONSOLE =================
-  Widget _buildConsole() {
+  Widget _console() {
     return Container(
-      color: const Color(0xFF161616),
+      color: const Color(0xFF141414),
       child: Column(
         children: [
           Container(
-            height: 28,
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            color: const Color(0xFF252526),
+            height: 24,
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            color: const Color(0xFF1A1A1A),
             child: Row(
               children: [
-                _smallBtn(
-                    Icons.backspace_outlined, 'Clear', _clearConsole),
-                _smallBtn(Icons.keyboard_hide_outlined, 'Hide keyboard', () {
+                _icon(Icons.backspace_outlined, _clearConsole),
+                _icon(Icons.keyboard_hide_outlined, () {
                   FocusScope.of(context).unfocus();
                 }),
                 const Spacer(),
                 const Text(
                   'OUTPUT',
                   style: TextStyle(
-                    fontSize: 10,
-                    letterSpacing: 1.5,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF888888),
+                    fontSize: 9,
+                    letterSpacing: 1.3,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF6A6A6A),
                   ),
                 ),
                 const Spacer(),
-                _smallBtn(Icons.close, 'Hide console', () {
+                _icon(Icons.close, () {
                   setState(() => _showConsole = false);
                 }),
               ],
@@ -845,10 +768,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               child: _outputController.text.isEmpty
                   ? const Center(
                       child: Text(
-                        'Output will appear here...',
+                        'Output will appear here',
                         style: TextStyle(
                           fontFamily: 'monospace',
-                          fontSize: 11,
+                          fontSize: 10.5,
                           color: Color(0xFF5A5A5A),
                         ),
                       ),
@@ -859,9 +782,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                         _outputController.text,
                         style: const TextStyle(
                           fontFamily: 'monospace',
-                          fontSize: 11,
+                          fontSize: 10.5,
                           height: 1.5,
-                          color: Color(0xFFD4D4D4),
+                          color: Color(0xFFCCCCCC),
                         ),
                       ),
                     ),
@@ -872,22 +795,18 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  Widget _smallBtn(IconData icon, String tip, VoidCallback onTap) {
-    return Tooltip(
-      message: tip,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(4),
-        child: Padding(
-          padding: const EdgeInsets.all(5),
-          child: Icon(icon, size: 14, color: const Color(0xFFCCCCCC)),
-        ),
+  Widget _icon(IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: Icon(icon, size: 12, color: const Color(0xFFAAAAAA)),
       ),
     );
   }
 
-  // ================= SPECIAL KEYS BAR =================
-  Widget _buildSpecialKeysBar() {
+  Widget _specialKeysBar() {
     final keys = <Map<String, String>>[
       {'label': 'CTRL', 'type': 'mod', 'id': 'ctrl'},
       {'label': 'SHIFT', 'type': 'mod', 'id': 'shift'},
@@ -927,12 +846,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     ];
 
     return Container(
-      height: 42,
-      decoration: BoxDecoration(
-        color: const Color(0xFF252526),
-        border: Border(
-          top: BorderSide(color: const Color(0xFF1E1E1E), width: 1),
-        ),
+      height: 38,
+      decoration: const BoxDecoration(
+        color: Color(0xFF1A1A1A),
+        border: Border(top: BorderSide(color: Color(0xFF2A2A2A))),
       ),
       child: Row(
         children: [
@@ -948,7 +865,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                 final active = (id == 'ctrl' && _ctrlActive) ||
                     (id == 'shift' && _shiftActive) ||
                     (id == 'alt' && _altActive);
-
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 2),
                   child: InkWell(
@@ -966,11 +882,11 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                     borderRadius: BorderRadius.circular(5),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 9, vertical: 4),
+                          horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
                         color: active
-                            ? const Color(0xFF4A9EFF).withOpacity(0.25)
-                            : const Color(0xFF2D2D30),
+                            ? const Color(0xFF4A9EFF).withOpacity(0.22)
+                            : const Color(0xFF252525),
                         borderRadius: BorderRadius.circular(5),
                         border: Border.all(
                           color: active
@@ -984,11 +900,11 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                           k['label']!,
                           style: TextStyle(
                             fontFamily: 'monospace',
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w500,
                             color: active
                                 ? const Color(0xFF4A9EFF)
-                                : const Color(0xFFD4D4D4),
+                                : const Color(0xFFCCCCCC),
                           ),
                         ),
                       ),
@@ -1001,17 +917,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           InkWell(
             onTap: () => setState(() => _showSpecialKeys = false),
             child: Container(
-              width: 42,
-              height: 42,
+              width: 36,
+              height: 38,
               decoration: const BoxDecoration(
-                color: Color(0xFF2D2D30),
-                border: Border(
-                  left: BorderSide(color: Color(0xFF1E1E1E)),
-                ),
+                color: Color(0xFF252525),
+                border: Border(left: BorderSide(color: Color(0xFF1A1A1A))),
               ),
               child: const Center(
-                child: Icon(Icons.close,
-                    size: 14, color: Color(0xFFCCCCCC)),
+                child: Icon(Icons.close, size: 13, color: Color(0xFFAAAAAA)),
               ),
             ),
           ),
@@ -1020,8 +933,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= FAB =================
-  Widget _buildFAB() {
+  Widget _fab() {
     return GestureDetector(
       onLongPress: () {
         HapticFeedback.mediumImpact();
@@ -1029,8 +941,11 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       },
       child: FloatingActionButton(
         mini: true,
-        backgroundColor: const Color(0xFF2D2D30),
-        elevation: 3,
+        backgroundColor: const Color(0xFF252525),
+        elevation: 0,
+        shape: const CircleBorder(
+          side: BorderSide(color: Color(0xFF2E2E2E), width: 1),
+        ),
         onPressed: () {
           HapticFeedback.lightImpact();
           setState(() => _showConsole = !_showConsole);
@@ -1039,34 +954,15 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           _showConsole
               ? Icons.keyboard_arrow_down
               : Icons.keyboard_arrow_up,
-          color: const Color(0xFFCCCCCC),
+          color: const Color(0xFFAAAAAA),
+          size: 18,
         ),
       ),
     );
   }
 }
 
-// ================= MENU ROW =================
-class _MenuRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  const _MenuRow(this.icon, this.label);
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: const Color(0xFFCCCCCC)),
-        const SizedBox(width: 12),
-        Text(label,
-            style: const TextStyle(
-                fontSize: 13, color: Color(0xFFD4D4D4))),
-      ],
-    );
-  }
-}
-
-// ================= SIDEBAR =================
+// ================= DRAWER =================
 class SidebarContent extends StatelessWidget {
   final int activeIndex;
   final ValueChanged<int> onIndexChanged;
@@ -1087,22 +983,24 @@ class SidebarContent extends StatelessWidget {
       children: [
         Container(
           width: 50,
-          color: const Color(0xFF181818),
+          color: const Color(0xFF141414),
           child: Column(
             children: [
-              const SizedBox(height: 30),
+              const SizedBox(height: 16),
               _strip(Icons.folder_outlined, 0, 'Files'),
               _strip(Icons.search, 1, 'Search'),
               _strip(Icons.notifications_none, 2, 'Alerts'),
               _strip(Icons.favorite_border, 3, 'Favorites'),
+              const Spacer(),
               _strip(Icons.person_outline, 4, 'Profile'),
+              const SizedBox(height: 16),
             ],
           ),
         ),
         Expanded(
           child: Container(
-            color: const Color(0xFF1E1E1E),
-            child: _buildContent(context),
+            color: const Color(0xFF1A1A1A),
+            child: _content(context),
           ),
         ),
       ],
@@ -1111,44 +1009,44 @@ class SidebarContent extends StatelessWidget {
 
   Widget _strip(IconData icon, int index, String tip) {
     final active = activeIndex == index;
-    return Tooltip(
-      message: tip,
-      child: InkWell(
-        onTap: () => onIndexChanged(index),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 13),
-          decoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(
-                color: active
-                    ? const Color(0xFF4A9EFF)
-                    : Colors.transparent,
-                width: 3,
-              ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Tooltip(
+        message: tip,
+        child: InkWell(
+          onTap: () => onIndexChanged(index),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            decoration: BoxDecoration(
+              color: active
+                  ? const Color(0xFF252525)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
             ),
-          ),
-          child: Icon(
-            icon,
-            size: 19,
-            color: active
-                ? const Color(0xFFD4D4D4)
-                : const Color(0xFF6A6A6A),
+            child: Icon(
+              icon,
+              size: 17,
+              color: active
+                  ? const Color(0xFF4A9EFF)
+                  : const Color(0xFF7A7A7A),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildContent(BuildContext context) {
+  Widget _content(BuildContext context) {
     switch (activeIndex) {
       case 0:
         return _filesPanel();
       case 1:
-        return _placeholder(
-            'SEARCH', Icons.search, 'Search across files coming soon.');
+        return _placeholder('SEARCH', Icons.search, 'No search yet.');
       case 2:
         return _placeholder(
-            'ALERTS', Icons.notifications_none, 'No new notifications.');
+            'ALERTS', Icons.notifications_none, 'No notifications.');
       case 3:
         return _placeholder(
             'FAVORITES', Icons.favorite_border, 'No favorites yet.');
@@ -1164,13 +1062,13 @@ class SidebarContent extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(14, 20, 14, 10),
+          padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
           child: Text('FILES',
               style: TextStyle(
-                fontSize: 10,
+                fontSize: 9.5,
                 letterSpacing: 1.5,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF888888),
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF7A7A7A),
               )),
         ),
         Expanded(
@@ -1178,26 +1076,38 @@ class SidebarContent extends StatelessWidget {
               ? const Center(
                   child: Text('No files open',
                       style: TextStyle(
-                          fontSize: 11.5, color: Color(0xFF666666))),
+                          fontSize: 11, color: Color(0xFF666666))),
                 )
-              : ListView(
-                  padding: EdgeInsets.zero,
-                  children: files
-                      .map((f) => ListTile(
-                            dense: true,
-                            visualDensity:
-                                const VisualDensity(vertical: -3),
-                            leading: const Icon(
-                                Icons.description_outlined,
-                                size: 16,
-                                color: Color(0xFF4A9EFF)),
-                            title: Text(f,
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Color(0xFFD4D4D4))),
-                            onTap: () => onFileTap(f),
-                          ))
-                      .toList(),
+              : ListView.builder(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  itemCount: files.length,
+                  itemBuilder: (_, i) {
+                    final name = files[i];
+                    return InkWell(
+                      onTap: () => onFileTap(name),
+                      borderRadius: BorderRadius.circular(7),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        margin: const EdgeInsets.only(bottom: 2),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.description_outlined,
+                                size: 14, color: Color(0xFF4A9EFF)),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFFCCCCCC))),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
         ),
       ],
@@ -1208,15 +1118,15 @@ class SidebarContent extends StatelessWidget {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(14, 20, 14, 10),
+          padding: const EdgeInsets.fromLTRB(14, 18, 14, 8),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(title,
                 style: const TextStyle(
-                  fontSize: 10,
+                  fontSize: 9.5,
                   letterSpacing: 1.5,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF888888),
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF7A7A7A),
                 )),
           ),
         ),
@@ -1225,14 +1135,14 @@ class SidebarContent extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 36, color: const Color(0xFF444444)),
+                Icon(icon, size: 30, color: const Color(0xFF444444)),
                 const SizedBox(height: 10),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Text(msg,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                          fontSize: 11.5, color: Color(0xFF888888))),
+                          fontSize: 11, color: Color(0xFF7A7A7A))),
                 ),
               ],
             ),
@@ -1246,15 +1156,15 @@ class SidebarContent extends StatelessWidget {
     return Column(
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(14, 20, 14, 10),
+          padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text('PROFILE',
                 style: TextStyle(
-                  fontSize: 10,
+                  fontSize: 9.5,
                   letterSpacing: 1.5,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF888888),
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF7A7A7A),
                 )),
           ),
         ),
@@ -1265,78 +1175,50 @@ class SidebarContent extends StatelessWidget {
               children: [
                 const SizedBox(height: 20),
                 Container(
-                  width: 68,
-                  height: 68,
+                  width: 58,
+                  height: 58,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: const Color(0xFF2D2D30),
+                    color: const Color(0xFF252525),
                     border: Border.all(
-                        color: const Color(0xFF3A3A3A), width: 1.5),
+                        color: const Color(0xFF303030), width: 1.5),
                   ),
                   child: const Icon(Icons.person_outline,
-                      size: 30, color: Color(0xFF6A6A6A)),
+                      size: 26, color: Color(0xFF6A6A6A)),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 12),
                 const Text(
                   'Not signed in',
                   style: TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFFD4D4D4),
+                    fontSize: 12,
+                    color: Color(0xFFCCCCCC),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
-                const SizedBox(height: 5),
+                const SizedBox(height: 4),
                 const Text(
-                  'Sign in to sync your files across devices.',
+                  'Sign in to sync files.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 11.5,
-                    color: Color(0xFF888888),
-                    height: 1.5,
+                    fontSize: 11,
+                    color: Color(0xFF7A7A7A),
                   ),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 16),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF4A9EFF),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(7),
                       ),
                     ),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('Sign-in coming soon')),
-                      );
-                    },
+                    onPressed: () {},
                     child: const Text('Sign in',
-                        style: TextStyle(fontSize: 13)),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFFCCCCCC),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      side: const BorderSide(color: Color(0xFF3A3A3A)),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('Create account coming soon')),
-                      );
-                    },
-                    child: const Text('Create account',
-                        style: TextStyle(fontSize: 13)),
+                        style: TextStyle(fontSize: 12)),
                   ),
                 ),
               ],
