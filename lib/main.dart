@@ -554,7 +554,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           icon: const Icon(Icons.more_vert,
               size: 17, color: Color(0xFFAAAAAA)),
           splashRadius: 20,
-          padding: EdgeInsets.zero,
           iconSize: 17,
           color: const Color(0xFF252525),
           elevation: 6,
@@ -563,7 +562,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             borderRadius: BorderRadius.circular(10),
             side: const BorderSide(color: Color(0xFF2E2E2E), width: 1),
           ),
-          padding: EdgeInsets.zero,
           onSelected: _handleMenu,
           itemBuilder: (_) => [
             _mi('new', Icons.note_add_outlined, 'New file'),
