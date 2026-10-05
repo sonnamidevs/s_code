@@ -6,20 +6,26 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_code_editor/flutter_code_editor.dart';
 import 'package:highlight/languages/python.dart';
 import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:flutter_highlight/themes/atom-one-light.dart';
+import 'package:flutter_highlight/themes/github.dart';
+import 'package:flutter_highlight/themes/monokai.dart';
+import 'package:flutter_highlight/themes/vs2015.dart';
+import 'settings_screen.dart';
+import 'about_screen.dart';
 
 // ================= APP ENTRY =================
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PrideApp());
+  runApp(const PyIDEApp());
 }
 
-class PrideApp extends StatelessWidget {
-  const PrideApp({super.key});
+class PyIDEApp extends StatelessWidget {
+  const PyIDEApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Pride',
+      title: 'PyIDE',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -34,7 +40,7 @@ class PrideApp extends StatelessWidget {
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF1E1E1E),
           elevation: 0,
-          centerTitle: true,
+          centerTitle: false,
         ),
       ),
       home: const MainScaffold(),
@@ -42,7 +48,7 @@ class PrideApp extends StatelessWidget {
   }
 }
 
-// ================= DATA MODELS =================
+// ================= DATA MODEL =================
 class EditorTabData {
   String name;
   String content;
@@ -63,14 +69,17 @@ class _MainScaffoldState extends State<MainScaffold> {
       MethodChannel('com.sonnamidevs.s_code/native');
   bool _isSetupComplete = false;
   bool _isRunning = false;
-  String _status = 'Preparing runtime...';
+  bool _hasError = false;
+  String _statusMessage = 'Preparing...';
   String? _nativeLibDir;
   String? _pythonRoot;
 
   // Editor
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
+  final ScrollController _editorScroll = ScrollController();
   bool _isAutoIndenting = false;
+  bool _showLineNumbers = true;
 
   // Tabs
   final List<EditorTabData> _tabs = [];
@@ -78,18 +87,33 @@ class _MainScaffoldState extends State<MainScaffold> {
 
   // UI state
   double _fontSize = 14;
+  String _themeName = 'atom-one-dark';
+  double _consoleFraction = 0.35;
   bool _showConsole = true;
-  bool _showToolbar = true;
+  bool _showSpecialKeys = false;
+  bool _ctrlActive = false;
+  bool _shiftActive = false;
+  bool _altActive = false;
   int _sidebarIndex = 0;
 
   // Console
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _outputScroll = ScrollController();
 
-  // Sidebar drawer key
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  static const String _welcomeCode = '''# Welcome to Pride
+  static const Map<String, Map<String, TextStyle>> _themes = {
+    'atom-one-dark': atomOneDarkTheme,
+    'atom-one-light': atomOneLightTheme,
+    'github': githubTheme,
+    'monokai': monokaiTheme,
+    'vs2015': vs2015Theme,
+  };
+
+  Map<String, TextStyle> get _themeStyles =>
+      _themes[_themeName] ?? atomOneDarkTheme;
+
+  static const String _welcomeCode = '''# Welcome to PyIDE
 # A real Python editor for Android.
 
 import sys
@@ -116,29 +140,26 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     _codeController = CodeController(text: _welcomeCode, language: python);
     _codeController.addListener(_onCodeChanged);
     _tabs.add(EditorTabData(name: 'main.py', content: _welcomeCode));
-    _loadFontSize();
+    _loadPrefs();
     _setupPython();
   }
 
-  Future<void> _loadFontSize() async {
-    final prefs = await SharedPreferences.getInstance();
-    final size = prefs.getDouble('font_size') ?? 14.0;
-    if (mounted) setState(() => _fontSize = size);
-  }
-
-  Future<void> _saveFontSize(double size) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('font_size', size);
+  Future<void> _loadPrefs() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _fontSize = p.getDouble('font_size') ?? 14.0;
+      _themeName = p.getString('theme') ?? 'atom-one-dark';
+      _showLineNumbers = p.getBool('show_line_numbers') ?? true;
+    });
   }
 
   // ================= AUTO-INDENT =================
   void _onCodeChanged() {
     if (_isAutoIndenting) return;
-
     final value = _codeController.value;
     final text = value.text;
     final sel = value.selection;
-
     if (!sel.isValid || !sel.isCollapsed) return;
     final pos = sel.baseOffset;
     if (pos <= 0 || pos > text.length) return;
@@ -146,26 +167,19 @@ print(f"2 + 3 = {calc.add(2, 3)}")
 
     final before = text.substring(0, pos - 1);
     final lastNl = before.lastIndexOf('\n');
-    final prevLine =
-        lastNl == -1 ? before : before.substring(lastNl + 1);
-
+    final prevLine = lastNl == -1 ? before : before.substring(lastNl + 1);
     if (prevLine.trim().isEmpty) return;
 
     final leading = prevLine.length - prevLine.trimLeft().length;
     var indent = ' ' * leading;
-
-    if (prevLine.trimRight().endsWith(':')) {
-      indent += '    ';
-    }
-
+    if (prevLine.trimRight().endsWith(':')) indent += '    ';
     if (indent.isEmpty) return;
 
     _isAutoIndenting = true;
     try {
       _codeController.value = value.copyWith(
         text: text.substring(0, pos) + indent + text.substring(pos),
-        selection:
-            TextSelection.collapsed(offset: pos + indent.length),
+        selection: TextSelection.collapsed(offset: pos + indent.length),
         composing: TextRange.empty,
       );
     } finally {
@@ -176,10 +190,13 @@ print(f"2 + 3 = {calc.add(2, 3)}")
   // ================= PYTHON SETUP =================
   Future<void> _setupPython() async {
     try {
-      setState(() => _status = 'Locating native directory...');
+      setState(() {
+        _statusMessage = 'Locating native directory...';
+        _hasError = false;
+      });
       _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
       if (_nativeLibDir == null || _nativeLibDir!.isEmpty) {
-        throw Exception('Could not determine native library directory.');
+        throw Exception('Native library directory unavailable');
       }
 
       final docsDir = await getApplicationDocumentsDirectory();
@@ -187,18 +204,15 @@ print(f"2 + 3 = {calc.add(2, 3)}")
       final root = Directory(_pythonRoot!);
 
       final wrapper = File('$_nativeLibDir/libpython3-exec.so');
-      if (!wrapper.existsSync()) {
-        throw Exception('Python wrapper not found.');
-      }
+      if (!wrapper.existsSync()) throw Exception('Python wrapper not found');
 
       final marker = File('${root.path}/.extracted_v7');
       if (!marker.existsSync()) {
-        setState(() => _status = 'Extracting Python runtime...');
+        setState(() => _statusMessage = 'Extracting Python runtime...');
         if (root.existsSync()) root.deleteSync(recursive: true);
         await root.create(recursive: true);
 
-        final data =
-            await rootBundle.load('assets/python/python-embed.tar.gz');
+        final data = await rootBundle.load('assets/python/python-embed.tar.gz');
         final tmpTar = File('${docsDir.path}/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
@@ -225,15 +239,18 @@ rm -rf _tmp
 
       setState(() {
         _isSetupComplete = true;
-        _status = 'Ready';
+        _statusMessage = 'Ready';
       });
     } catch (e) {
+      setState(() {
+        _hasError = true;
+        _statusMessage = 'Setup failed: $e';
+      });
       _append('Setup failed: $e');
-      setState(() => _status = 'Setup failed');
     }
   }
 
-  // ================= RUN CODE =================
+  // ================= RUN =================
   Future<void> _runCode() async {
     if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) {
       return;
@@ -268,8 +285,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         _append(result.stderr as String);
       }
       _append('─' * 44);
-      _append(
-          'Exit ${result.exitCode}  ${result.exitCode == 0 ? "✓" : "✗"}');
+      _append('Exit ${result.exitCode}  ${result.exitCode == 0 ? "✓" : "✗"}');
     } catch (e) {
       _append('Run error: $e');
     } finally {
@@ -292,7 +308,23 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 
   void _clearConsole() => setState(() => _outputController.clear());
 
-  // ================= TAB MANAGEMENT =================
+  // ================= TEXT INSERTION =================
+  void _insertText(String text) {
+    final value = _codeController.value;
+    final sel = value.selection;
+    if (!sel.isValid) {
+      _codeController.text = value.text + text;
+      return;
+    }
+    final newText = value.text.replaceRange(sel.start, sel.end, text);
+    _codeController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: sel.start + text.length),
+    );
+    _editorFocus.requestFocus();
+  }
+
+  // ================= TABS =================
   void _switchTab(int i) {
     if (i == _activeTab) return;
     _tabs[_activeTab].content = _codeController.text;
@@ -301,8 +333,8 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   }
 
   void _newFile() {
-    final name = 'untitled_${_tabs.length + 1}.py';
     _tabs[_activeTab].content = _codeController.text;
+    final name = 'untitled_${_tabs.length + 1}.py';
     setState(() {
       _tabs.add(EditorTabData(name: name, content: ''));
       _activeTab = _tabs.length - 1;
@@ -312,7 +344,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 
   void _closeTab(int i) {
     if (_tabs.length == 1) {
-      _newFile();
+      setState(() {
+        _tabs[0] = EditorTabData(name: 'untitled.py', content: '');
+        _codeController.text = '';
+      });
       return;
     }
     setState(() {
@@ -328,136 +363,46 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     await f.writeAsString(_tabs[_activeTab].content);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Saved ${_tabs[_activeTab].name}')),
+        SnackBar(
+          content: Text('Saved ${_tabs[_activeTab].name}'),
+          duration: const Duration(seconds: 1),
+          backgroundColor: const Color(0xFF252526),
+        ),
       );
     }
   }
 
   // ================= MENU =================
-  Future<void> _handleMenu(String value) async {
-    switch (value) {
+  Future<void> _handleMenu(String v) async {
+    switch (v) {
       case 'new':
         _newFile();
         break;
       case 'save':
         await _saveCurrentFile();
         break;
-      case 'saveas':
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Save As coming soon')),
-        );
-        break;
-      case 'files':
-        setState(() => _sidebarIndex = 0);
-        _scaffoldKey.currentState?.openDrawer();
-        break;
       case 'close':
         _closeTab(_activeTab);
-        break;
-      case 'recent':
-        _showRecentFiles();
-        break;
-      case 'find':
-        _showFindDialog();
         break;
       case 'console':
         setState(() => _showConsole = !_showConsole);
         break;
-      case 'terminal':
-        _showTerminalPlaceholder();
-        break;
       case 'settings':
         _openSettings();
+        break;
+      case 'about':
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const AboutScreen()),
+        );
         break;
       case 'help':
         _showHelp();
         break;
       case 'exit':
-        _showExitConfirm();
+        SystemNavigator.pop();
         break;
     }
-  }
-
-  void _showRecentFiles() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF252526),
-      builder: (_) => Container(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Recent Files',
-                style: TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ..._tabs.map((t) => ListTile(
-                  leading: const Icon(Icons.description_outlined,
-                      size: 20, color: Color(0xFF4A9EFF)),
-                  title: Text(t.name),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _switchTab(_tabs.indexOf(t));
-                  },
-                )),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showFindDialog() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF252526),
-        title: const Text('Find'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'Search in file...',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final query = controller.text;
-              if (query.isNotEmpty) {
-                final idx = _codeController.text.indexOf(query);
-                if (idx >= 0) {
-                  _codeController.selection = TextSelection(
-                    baseOffset: idx,
-                    extentOffset: idx + query.length,
-                  );
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Not found')),
-                  );
-                }
-              }
-              Navigator.pop(context);
-            },
-            child: const Text('Find'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showTerminalPlaceholder() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Interactive terminal coming in a future update'),
-      ),
-    );
   }
 
   void _showHelp() {
@@ -465,52 +410,21 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: const Color(0xFF252526),
-        title: const Text('Pride — Help'),
-        content: const SingleChildScrollView(
-          child: Text(
-            'Shortcuts:\n\n'
-            '• Run: tap the ▶ icon in the app bar\n'
-            '• Clear console: 🧹 icon in the app bar\n'
-            '• Auto-indent: press Enter after a line ending with :\n'
-            '• Font size: three-dot menu → Settings\n'
-            '• File tabs: tap to switch, ✕ to close\n\n'
-            'Tips:\n'
-            '• Python 3.14 runs on-device\n'
-            '• No internet required after install\n'
-            '• Save files to keep them between sessions',
-            style: TextStyle(height: 1.5),
-          ),
+        title: const Text('PyIDE — Help',
+            style: TextStyle(color: Color(0xFFD4D4D4))),
+        content: const Text(
+          '• Run: tap ▶ in the app bar\n'
+          '• Save: tap the pencil icon\n'
+          '• Auto-indent: after a line ending in :\n'
+          '• Resize console: drag the small handle\n'
+          '• Special keys: long-press the ▲ button\n'
+          '• Settings: three-dot menu → Settings',
+          style: TextStyle(height: 1.6, color: Color(0xFFCCCCCC)),
         ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showExitConfirm() {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF252526),
-        title: const Text('Exit Pride?'),
-        content: const Text('Any unsaved changes will be lost.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style:
-                FilledButton.styleFrom(backgroundColor: Colors.redAccent),
-            onPressed: () {
-              Navigator.pop(context);
-              SystemNavigator.pop();
-            },
-            child: const Text('Exit'),
+            child: const Text('Got it'),
           ),
         ],
       ),
@@ -522,11 +436,12 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       context,
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
-          fontSize: _fontSize,
-          onFontSizeChanged: (v) {
-            setState(() => _fontSize = v);
-            _saveFontSize(v);
-          },
+          initialFontSize: _fontSize,
+          initialTheme: _themeName,
+          initialShowLineNumbers: _showLineNumbers,
+          onFontSizeChanged: (v) => setState(() => _fontSize = v),
+          onThemeChanged: (k) => setState(() => _themeName = k),
+          onLineNumbersChanged: (v) => setState(() => _showLineNumbers = v),
         ),
       ),
     );
@@ -537,6 +452,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _codeController.removeListener(_onCodeChanged);
     _codeController.dispose();
     _editorFocus.dispose();
+    _editorScroll.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
     super.dispose();
@@ -562,24 +478,40 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         ),
       ),
       appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          _buildStatusBar(),
-          _buildFileTabs(),
-          Expanded(
-            flex: 3,
-            child: _buildEditor(),
-          ),
-          if (_showConsole) ...[
-            _buildActionRow(),
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildFileTabs(),
             Expanded(
-              flex: 2,
-              child: _buildConsole(),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final total = constraints.maxHeight;
+                  final consoleH =
+                      (_showConsole ? total * _consoleFraction : 0).toDouble();
+                  final editorH = total - consoleH - (_showConsole ? 14 : 0);
+
+                  return Column(
+                    children: [
+                      SizedBox(
+                        height: editorH,
+                        child: _buildEditor(),
+                      ),
+                      if (_showConsole) _buildDragHandle(total),
+                      if (_showConsole)
+                        SizedBox(
+                          height: consoleH,
+                          child: _buildConsole(),
+                        ),
+                      if (_showSpecialKeys) _buildSpecialKeysBar(),
+                    ],
+                  );
+                },
+              ),
             ),
           ],
-        ],
+        ),
       ),
-      floatingActionButton: _buildFloatingButton(),
+      floatingActionButton: _buildFAB(),
     );
   }
 
@@ -587,21 +519,61 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       backgroundColor: const Color(0xFF1E1E1E),
+      toolbarHeight: 52,
       leading: IconButton(
         icon: const Icon(Icons.menu, color: Color(0xFFCCCCCC)),
         onPressed: () => _scaffoldKey.currentState?.openDrawer(),
       ),
-      title: Text(
-        _tabs[_activeTab].name,
-        style: const TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w500,
-          color: Color(0xFFCCCCCC),
-        ),
+      titleSpacing: 0,
+      title: Row(
+        children: [
+          if (!_isSetupComplete && !_hasError)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.5, color: Color(0xFFD29922)),
+              ),
+            ),
+          if (_hasError)
+            GestureDetector(
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(_statusMessage),
+                    backgroundColor: const Color(0xFFF85149),
+                  ),
+                );
+              },
+              child: Container(
+                width: 10,
+                height: 10,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFFF85149),
+                ),
+              ),
+            ),
+          Flexible(
+            child: Text(
+              _tabs[_activeTab].name,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFFD4D4D4),
+              ),
+            ),
+          ),
+        ],
       ),
       actions: [
         IconButton(
-          icon: const Icon(Icons.edit_outlined, color: Color(0xFFCCCCCC)),
+          icon: const Icon(Icons.edit_outlined,
+              color: Color(0xFFCCCCCC), size: 20),
           onPressed: _saveCurrentFile,
           tooltip: 'Save',
         ),
@@ -619,40 +591,32 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           tooltip: 'Run',
         ),
         PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert, color: Color(0xFFCCCCCC)),
+          icon: const Icon(Icons.more_vert,
+              color: Color(0xFFCCCCCC), size: 20),
           color: const Color(0xFF2D2D30),
           onSelected: _handleMenu,
           itemBuilder: (_) => const [
-            PopupMenuItem(value: 'new', child: _MenuRow(Icons.add, 'New file')),
+            PopupMenuItem(
+                value: 'new', child: _MenuRow(Icons.add, 'New file')),
             PopupMenuItem(
                 value: 'save', child: _MenuRow(Icons.save_outlined, 'Save')),
-            PopupMenuItem(
-                value: 'saveas',
-                child: _MenuRow(Icons.save_as_outlined, 'Save as')),
-            PopupMenuItem(
-                value: 'files',
-                child: _MenuRow(Icons.folder_outlined, 'Files')),
             PopupMenuItem(
                 value: 'close',
                 child: _MenuRow(Icons.close, 'Close file')),
             PopupMenuItem(
-                value: 'recent',
-                child: _MenuRow(Icons.history, 'Open recent')),
-            PopupMenuItem(
-                value: 'find',
-                child: _MenuRow(Icons.search, 'Find file')),
-            PopupMenuItem(
                 value: 'console',
-                child: _MenuRow(Icons.terminal, 'Console')),
-            PopupMenuItem(
-                value: 'terminal',
-                child: _MenuRow(Icons.code, 'Terminal')),
+                child: _MenuRow(Icons.terminal, 'Toggle console')),
+            PopupMenuDivider(),
             PopupMenuItem(
                 value: 'settings',
                 child: _MenuRow(Icons.settings_outlined, 'Settings')),
             PopupMenuItem(
+                value: 'about',
+                child: _MenuRow(Icons.info_outline, 'About')),
+            PopupMenuItem(
                 value: 'help',
                 child: _MenuRow(Icons.help_outline, 'Help')),
+            PopupMenuDivider(),
             PopupMenuItem(
                 value: 'exit', child: _MenuRow(Icons.logout, 'Exit')),
           ],
@@ -661,49 +625,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= STATUS BAR =================
-  Widget _buildStatusBar() {
-    Color c;
-    IconData icon;
-    if (_isSetupComplete) {
-      c = const Color(0xFF3FB950);
-      icon = Icons.check_circle_outline;
-    } else if (_status == 'Setup failed') {
-      c = const Color(0xFFF85149);
-      icon = Icons.error_outline;
-    } else {
-      c = const Color(0xFFD29922);
-      icon = Icons.hourglass_top;
-    }
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      color: const Color(0xFF161616),
-      child: Row(
-        children: [
-          Icon(icon, color: c, size: 13),
-          const SizedBox(width: 8),
-          Text(
-            _status,
-            style: TextStyle(fontSize: 11, color: c),
-          ),
-          const Spacer(),
-          Text(
-            'Python 3.14',
-            style: TextStyle(
-              fontSize: 11,
-              color: const Color(0xFF888888),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   // ================= FILE TABS =================
   Widget _buildFileTabs() {
     return Container(
-      height: 38,
+      height: 36,
       color: const Color(0xFF252526),
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
@@ -713,7 +638,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           return GestureDetector(
             onTap: () => _switchTab(i),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
                 color: active
                     ? const Color(0xFF1E1E1E)
@@ -730,22 +655,22 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               child: Row(
                 children: [
                   const Icon(Icons.description_outlined,
-                      size: 14, color: Color(0xFF4A9EFF)),
-                  const SizedBox(width: 8),
+                      size: 13, color: Color(0xFF4A9EFF)),
+                  const SizedBox(width: 7),
                   Text(
                     _tabs[i].name,
                     style: TextStyle(
-                      fontSize: 13,
+                      fontSize: 12.5,
                       color: active
                           ? const Color(0xFFD4D4D4)
                           : const Color(0xFF888888),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 7),
                   GestureDetector(
                     onTap: () => _closeTab(i),
                     child: const Icon(Icons.close,
-                        size: 14, color: Color(0xFF888888)),
+                        size: 13, color: Color(0xFF888888)),
                   ),
                 ],
               ),
@@ -761,7 +686,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     return Container(
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
-        data: CodeThemeData(styles: atomOneDarkTheme),
+        data: CodeThemeData(styles: _themeStyles),
         child: CodeField(
           controller: _codeController,
           focusNode: _editorFocus,
@@ -771,10 +696,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             height: 1.5,
           ),
           gutterStyle: GutterStyle(
-            width: 46,
-            showLineNumbers: true,
+            width: _showLineNumbers ? 46 : 0,
+            showLineNumbers: _showLineNumbers,
             showErrors: false,
-            showFoldingHandles: true,
+            showFoldingHandles: _showLineNumbers,
             textStyle: TextStyle(
               fontFamily: 'monospace',
               fontSize: _fontSize,
@@ -787,43 +712,33 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  // ================= ACTION ROW =================
-  Widget _buildActionRow() {
-    return Container(
-      height: 36,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      color: const Color(0xFF252526),
-      child: Row(
-        children: [
-          _toolbarIcon(Icons.backspace_outlined, 'Clear console', _clearConsole),
-          const SizedBox(width: 4),
-          _toolbarIcon(Icons.keyboard_hide_outlined, 'Hide keyboard', () {
-            FocusScope.of(context).unfocus();
-          }),
-          const Spacer(),
-          const Text(
-            'Output',
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 1.5,
-              color: Color(0xFF888888),
-              fontWeight: FontWeight.bold,
+  // ================= DRAG HANDLE =================
+  Widget _buildDragHandle(double total) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (details) {
+        setState(() {
+          _consoleFraction -= details.delta.dy / total;
+          _consoleFraction = _consoleFraction.clamp(0.1, 0.85);
+        });
+      },
+      onTap: () {
+        setState(() {
+          _consoleFraction = _consoleFraction > 0.5 ? 0.25 : 0.75;
+        });
+      },
+      child: Container(
+        height: 14,
+        color: const Color(0xFF1E1E1E),
+        child: Center(
+          child: Container(
+            width: 40,
+            height: 3,
+            decoration: BoxDecoration(
+              color: const Color(0xFF5A5A5A),
+              borderRadius: BorderRadius.circular(2),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _toolbarIcon(IconData icon, String tooltip, VoidCallback onTap) {
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(6),
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Icon(icon, size: 16, color: const Color(0xFFCCCCCC)),
         ),
       ),
     );
@@ -833,45 +748,232 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   Widget _buildConsole() {
     return Container(
       color: const Color(0xFF161616),
-      padding: const EdgeInsets.all(12),
-      width: double.infinity,
-      child: _outputController.text.isEmpty
-          ? const Center(
-              child: Text(
-                'Output will appear here...',
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  color: Color(0xFF5A5A5A),
+      child: Column(
+        children: [
+          Container(
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            color: const Color(0xFF252526),
+            child: Row(
+              children: [
+                _smallBtn(Icons.backspace_outlined, 'Clear', _clearConsole),
+                _smallBtn(Icons.keyboard_hide_outlined, 'Hide keyboard', () {
+                  FocusScope.of(context).unfocus();
+                }),
+                const Spacer(),
+                const Text(
+                  'OUTPUT',
+                  style: TextStyle(
+                    fontSize: 10,
+                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF888888),
+                  ),
                 ),
-              ),
-            )
-          : SingleChildScrollView(
-              controller: _outputScroll,
-              child: Text(
-                _outputController.text,
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  height: 1.5,
-                  color: Color(0xFFD4D4D4),
-                ),
-              ),
+                const Spacer(),
+                _smallBtn(Icons.close, 'Hide console', () {
+                  setState(() => _showConsole = false);
+                }),
+              ],
             ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: _outputController.text.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'Output will appear here...',
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: Color(0xFF5A5A5A),
+                        ),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      controller: _outputScroll,
+                      child: Text(
+                        _outputController.text,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          height: 1.5,
+                          color: Color(0xFFD4D4D4),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  // ================= FLOATING BUTTON =================
-  Widget _buildFloatingButton() {
-    return FloatingActionButton(
-      mini: true,
-      backgroundColor: const Color(0xFF2D2D30),
-      elevation: 4,
-      onPressed: () {
-        setState(() => _showToolbar = !_showToolbar);
+  Widget _smallBtn(IconData icon, String tooltip, VoidCallback onTap) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(5),
+          child: Icon(icon, size: 15, color: const Color(0xFFCCCCCC)),
+        ),
+      ),
+    );
+  }
+
+  // ================= SPECIAL KEYS BAR =================
+  Widget _buildSpecialKeysBar() {
+    final keys = <Map<String, String>>[
+      {'label': 'CTRL', 'type': 'mod', 'id': 'ctrl'},
+      {'label': 'SHIFT', 'type': 'mod', 'id': 'shift'},
+      {'label': 'ALT', 'type': 'mod', 'id': 'alt'},
+      {'label': 'TAB', 'type': 'act', 'insert': '    '},
+      {'label': '{', 'type': 'sym', 'insert': '{'},
+      {'label': '}', 'type': 'sym', 'insert': '}'},
+      {'label': '(', 'type': 'sym', 'insert': '('},
+      {'label': ')', 'type': 'sym', 'insert': ')'},
+      {'label': '[', 'type': 'sym', 'insert': '['},
+      {'label': ']', 'type': 'sym', 'insert': ']'},
+      {'label': '<', 'type': 'sym', 'insert': '<'},
+      {'label': '>', 'type': 'sym', 'insert': '>'},
+      {'label': '"', 'type': 'sym', 'insert': '"'},
+      {'label': "'", 'type': 'sym', 'insert': "'"},
+      {'label': '=', 'type': 'sym', 'insert': '='},
+      {'label': '+', 'type': 'sym', 'insert': '+'},
+      {'label': '-', 'type': 'sym', 'insert': '-'},
+      {'label': '*', 'type': 'sym', 'insert': '*'},
+      {'label': '/', 'type': 'sym', 'insert': '/'},
+      {'label': '%', 'type': 'sym', 'insert': '%'},
+      {'label': '!', 'type': 'sym', 'insert': '!'},
+      {'label': '&', 'type': 'sym', 'insert': '&'},
+      {'label': '|', 'type': 'sym', 'insert': '|'},
+      {'label': ':', 'type': 'sym', 'insert': ':'},
+      {'label': ';', 'type': 'sym', 'insert': ';'},
+      {'label': '.', 'type': 'sym', 'insert': '.'},
+      {'label': ',', 'type': 'sym', 'insert': ','},
+      {'label': '?', 'type': 'sym', 'insert': '?'},
+      {'label': '#', 'type': 'sym', 'insert': '#'},
+      {'label': '@', 'type': 'sym', 'insert': '@'},
+      {'label': r'$', 'type': 'sym', 'insert': r'$'},
+      {'label': '~', 'type': 'sym', 'insert': '~'},
+      {'label': '^', 'type': 'sym', 'insert': '^'},
+      {'label': '\\', 'type': 'sym', 'insert': '\\'},
+      {'label': '_', 'type': 'sym', 'insert': '_'},
+    ];
+
+    return Container(
+      height: 46,
+      color: const Color(0xFF252526),
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        itemCount: keys.length + 1,
+        itemBuilder: (_, i) {
+          if (i == keys.length) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: InkWell(
+                onTap: () => setState(() => _showSpecialKeys = false),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF30363D),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Center(
+                    child: Icon(Icons.close,
+                        size: 14, color: Color(0xFFCCCCCC)),
+                  ),
+                ),
+              ),
+            );
+          }
+
+          final k = keys[i];
+          final type = k['type']!;
+          final id = k['id'];
+          final isModActive = (id == 'ctrl' && _ctrlActive) ||
+              (id == 'shift' && _shiftActive) ||
+              (id == 'alt' && _altActive);
+
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            child: InkWell(
+              onTap: () {
+                if (type == 'mod') {
+                  setState(() {
+                    if (id == 'ctrl') _ctrlActive = !_ctrlActive;
+                    if (id == 'shift') _shiftActive = !_shiftActive;
+                    if (id == 'alt') _altActive = !_altActive;
+                  });
+                } else {
+                  _insertText(k['insert'] ?? '');
+                }
+              },
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isModActive
+                      ? const Color(0xFF4A9EFF).withOpacity(0.25)
+                      : const Color(0xFF2D2D30),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: isModActive
+                        ? const Color(0xFF4A9EFF)
+                        : Colors.transparent,
+                    width: 1,
+                  ),
+                ),
+                child: Center(
+                  child: Text(
+                    k['label']!,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: isModActive
+                          ? const Color(0xFF4A9EFF)
+                          : const Color(0xFFD4D4D4),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ================= FAB =================
+  Widget _buildFAB() {
+    return GestureDetector(
+      onLongPress: () {
+        HapticFeedback.mediumImpact();
+        setState(() => _showSpecialKeys = !_showSpecialKeys);
       },
-      child: const Icon(Icons.keyboard_arrow_up,
-          color: Color(0xFFCCCCCC)),
+      child: FloatingActionButton(
+        mini: true,
+        backgroundColor: const Color(0xFF2D2D30),
+        elevation: 3,
+        onPressed: () {
+          if (_editorFocus.hasFocus) {
+            FocusScope.of(context).unfocus();
+          } else {
+            _editorFocus.requestFocus();
+          }
+        },
+        child: const Icon(Icons.keyboard_arrow_up,
+            color: Color(0xFFCCCCCC)),
+      ),
     );
   }
 }
@@ -886,16 +988,16 @@ class _MenuRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, size: 18, color: const Color(0xFFCCCCCC)),
-        const SizedBox(width: 14),
+        Icon(icon, size: 17, color: const Color(0xFFCCCCCC)),
+        const SizedBox(width: 12),
         Text(label,
-            style: const TextStyle(fontSize: 14, color: Color(0xFFD4D4D4))),
+            style: const TextStyle(fontSize: 13.5, color: Color(0xFFD4D4D4))),
       ],
     );
   }
 }
 
-// ================= SIDEBAR (DRAWER) =================
+// ================= SIDEBAR =================
 class SidebarContent extends StatelessWidget {
   final int activeIndex;
   final ValueChanged<int> onIndexChanged;
@@ -914,26 +1016,24 @@ class SidebarContent extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        // Icon strip
         Container(
-          width: 56,
+          width: 54,
           color: const Color(0xFF181818),
           child: Column(
             children: [
-              const SizedBox(height: 40),
+              const SizedBox(height: 30),
               _stripIcon(Icons.folder_outlined, 0, 'Files'),
               _stripIcon(Icons.search, 1, 'Search'),
               _stripIcon(Icons.notifications_none, 2, 'Notifications'),
               _stripIcon(Icons.favorite_border, 3, 'Favorites'),
-              _stripIcon(Icons.person_outline, 4, 'About'),
+              _stripIcon(Icons.person_outline, 4, 'Profile'),
             ],
           ),
         ),
-        // Content
         Expanded(
           child: Container(
             color: const Color(0xFF1E1E1E),
-            child: _buildContent(context),
+            child: _buildContent(),
           ),
         ),
       ],
@@ -951,7 +1051,8 @@ class SidebarContent extends StatelessWidget {
           decoration: BoxDecoration(
             border: Border(
               left: BorderSide(
-                color: active ? const Color(0xFF4A9EFF) : Colors.transparent,
+                color:
+                    active ? const Color(0xFF4A9EFF) : Colors.transparent,
                 width: 3,
               ),
             ),
@@ -966,21 +1067,21 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
-  Widget _buildContent(BuildContext context) {
+  Widget _buildContent() {
     switch (activeIndex) {
       case 0:
         return _filesPanel();
       case 1:
-        return _placeholderPanel('Search', Icons.search,
+        return _placeholder('SEARCH', Icons.search,
             'Search across files coming soon.');
       case 2:
-        return _placeholderPanel('Notifications', Icons.notifications_none,
+        return _placeholder('NOTIFICATIONS', Icons.notifications_none,
             'No new notifications.');
       case 3:
-        return _placeholderPanel(
-            'Favorites', Icons.favorite_border, 'No favorites yet.');
+        return _placeholder(
+            'FAVORITES', Icons.favorite_border, 'No favorites yet.');
       case 4:
-        return _aboutPanel(context);
+        return _profilePanel();
       default:
         return const SizedBox.shrink();
     }
@@ -992,51 +1093,54 @@ class SidebarContent extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 20, 16, 10),
-          child: Text(
-            'FILES',
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 1.5,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF888888),
-            ),
-          ),
+          child: Text('FILES',
+              style: TextStyle(
+                fontSize: 11,
+                letterSpacing: 1.5,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF888888),
+              )),
         ),
         Expanded(
-          child: ListView(
-            children: files
-                .map((f) => ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.description_outlined,
-                          size: 18, color: Color(0xFF4A9EFF)),
-                      title: Text(f,
-                          style: const TextStyle(
-                              fontSize: 13, color: Color(0xFFD4D4D4))),
-                      onTap: () => onFileTap(f),
-                    ))
-                .toList(),
-          ),
+          child: files.isEmpty
+              ? const Center(
+                  child: Text('No files open',
+                      style: TextStyle(
+                          fontSize: 12, color: Color(0xFF666666))),
+                )
+              : ListView(
+                  children: files
+                      .map((f) => ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.description_outlined,
+                                size: 17, color: Color(0xFF4A9EFF)),
+                            title: Text(f,
+                                style: const TextStyle(
+                                    fontSize: 12.5,
+                                    color: Color(0xFFD4D4D4))),
+                            onTap: () => onFileTap(f),
+                          ))
+                      .toList(),
+                ),
         ),
       ],
     );
   }
 
-  Widget _placeholderPanel(String title, IconData icon, String message) {
+  Widget _placeholder(String title, IconData icon, String msg) {
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
           child: Align(
             alignment: Alignment.centerLeft,
-            child: Text(
-              title.toUpperCase(),
-              style: const TextStyle(
-                fontSize: 11,
-                letterSpacing: 1.5,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF888888),
-              ),
-            ),
+            child: Text(title,
+                style: const TextStyle(
+                  fontSize: 11,
+                  letterSpacing: 1.5,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF888888),
+                )),
           ),
         ),
         Expanded(
@@ -1044,13 +1148,14 @@ class SidebarContent extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 42, color: const Color(0xFF444444)),
+                Icon(icon, size: 40, color: const Color(0xFF444444)),
                 const SizedBox(height: 12),
-                Text(
-                  message,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      fontSize: 13, color: Color(0xFF888888)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Text(msg,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontSize: 12.5, color: Color(0xFF888888))),
                 ),
               ],
             ),
@@ -1060,266 +1165,111 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
-  Widget _aboutPanel(BuildContext context) {
+  Widget _profilePanel() {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 20, 16, 10),
-          child: Text(
-            'ABOUT',
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 1.5,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF888888),
-            ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text('PROFILE',
+                style: TextStyle(
+                  fontSize: 11,
+                  letterSpacing: 1.5,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF888888),
+                )),
           ),
         ),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const SizedBox(height: 20),
                 Container(
-                  width: 84,
-                  height: 84,
+                  width: 76,
+                  height: 76,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)],
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF4A9EFF).withOpacity(0.3),
-                        blurRadius: 20,
-                        spreadRadius: 2,
-                      ),
-                    ],
+                    color: const Color(0xFF2D2D30),
+                    border: Border.all(
+                        color: const Color(0xFF3A3A3A), width: 1.5),
                   ),
-                  child: const Center(
-                    child: Text(
-                      'BN',
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
+                  child: const Icon(Icons.person_outline,
+                      size: 34, color: Color(0xFF6A6A6A)),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 16),
                 const Text(
-                  'Bismark Nana Konadu',
+                  'Not signed in',
                   style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
                     color: Color(0xFFD4D4D4),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '@Sonnami Devs',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: const Color(0xFF4A9EFF),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
-                const SizedBox(height: 20),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF252526),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                        color: const Color(0xFF3A3A3A), width: 1),
-                  ),
-                  child: Column(
-                    children: const [
-                      _InfoRow(label: 'Studio', value: 'Sonnami Develops'),
-                      _InfoRow(label: 'Country', value: 'Ghana 🇬🇭'),
-                      _InfoRow(label: 'App', value: 'Pride IDE'),
-                      _InfoRow(label: 'Version', value: '0.2.0'),
-                      _InfoRow(label: 'Runtime', value: 'Python 3.14'),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 6),
                 const Text(
-                  'Built with care in Ghana.\nPride runs Python natively on Android.',
+                  'Sign in to sync your files across devices.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
-                    height: 1.6,
                     color: Color(0xFF888888),
+                    height: 1.5,
                   ),
                 ),
-                const SizedBox(height: 30),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF4A9EFF),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Sign-in coming soon'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    child: const Text('Sign in'),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFCCCCCC),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      side: const BorderSide(color: Color(0xFF3A3A3A)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Create account coming soon'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    child: const Text('Create account'),
+                  ),
+                ),
               ],
             ),
           ),
         ),
       ],
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final String label;
-  final String value;
-  const _InfoRow({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-                fontSize: 12, color: Color(0xFF888888)),
-          ),
-          const Spacer(),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFFD4D4D4),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ================= SETTINGS SCREEN =================
-class SettingsScreen extends StatefulWidget {
-  final double fontSize;
-  final ValueChanged<double> onFontSizeChanged;
-
-  const SettingsScreen({
-    super.key,
-    required this.fontSize,
-    required this.onFontSizeChanged,
-  });
-
-  @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  late double _size;
-
-  @override
-  void initState() {
-    super.initState();
-    _size = widget.fontSize;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF1E1E1E),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF1E1E1E),
-        title: const Text('Settings'),
-        iconTheme: const IconThemeData(color: Color(0xFFD4D4D4)),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          const Text(
-            'EDITOR',
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 1.5,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF888888),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFF252526),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Text('Font size',
-                        style: TextStyle(
-                            fontSize: 14, color: Color(0xFFD4D4D4))),
-                    const Spacer(),
-                    Text(
-                      '${_size.toStringAsFixed(0)} pt',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF4A9EFF),
-                      ),
-                    ),
-                  ],
-                ),
-                Slider(
-                  value: _size,
-                  min: 10,
-                  max: 28,
-                  divisions: 18,
-                  activeColor: const Color(0xFF4A9EFF),
-                  inactiveColor: const Color(0xFF3A3A3A),
-                  onChanged: (v) {
-                    setState(() => _size = v);
-                    widget.onFontSizeChanged(v);
-                  },
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Preview:',
-                  style: TextStyle(fontSize: 11, color: Color(0xFF888888)),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1E1E),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    'def greet(name):\n    return f"Hello, {name}!"',
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: _size,
-                      height: 1.5,
-                      color: const Color(0xFFD4D4D4),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 30),
-          Center(
-            child: Text(
-              'Pride IDE · Sonnami Develops',
-              style: TextStyle(
-                fontSize: 11,
-                color: const Color(0xFF5A5A5A),
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
