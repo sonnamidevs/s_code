@@ -1033,7 +1033,7 @@ class SidebarContent extends StatelessWidget {
         Expanded(
           child: Container(
             color: const Color(0xFF1E1E1E),
-            child: _buildContent(),
+            child: _buildContent(context),
           ),
         ),
       ],
@@ -1067,7 +1067,7 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
-  Widget _buildContent() {
+  Widget _buildContent(BuildContext context) {
     switch (activeIndex) {
       case 0:
         return _filesPanel();
@@ -1081,7 +1081,7 @@ class SidebarContent extends StatelessWidget {
         return _placeholder(
             'FAVORITES', Icons.favorite_border, 'No favorites yet.');
       case 4:
-        return _profilePanel();
+        return _profilePanel(context);
       default:
         return const SizedBox.shrink();
     }
@@ -1165,7 +1165,7 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
-  Widget _profilePanel() {
+  Widget _profilePanel(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
