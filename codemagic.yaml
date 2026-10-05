@@ -1,0 +1,66 @@
+workflows:
+  android-release:
+    name: PyIDE Android Release
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      flutter: stable
+      java: 17
+      vars:
+        KEYSTORE_BASE64: "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"
+        KEYSTORE_PASSWORD: "Sonnami"
+        KEY_ALIAS: "scode"
+        KEY_PASSWORD: "Sonnami"
+    cache:
+      cache_paths:
+        - ~/.pub-cache
+        - ~/.gradle/caches
+        - ~/.gradle/wrapper
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: Decode Keystore
+        script: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+
+      - name: Create key.properties
+        script: |
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Verify keystore
+        script: |
+          ls -lh android/app/upload-keystore.jks
+          cat android/key.properties
+
+      - name: Flutter pub get
+        script: |
+          flutter pub get
+
+      - name: Build APK
+        script: |
+          flutter build apk --release
+
+      - name: Rename APK
+        script: |
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/PyIDE.apk
+
+    artifacts:
+      - build/app/outputs/flutter-apk/PyIDE.apk
+
+    publishing:
+      email:
+        recipients:
+          - sonnamidev@gmail.com
+        notify:
+          success: true
+          failure: true
