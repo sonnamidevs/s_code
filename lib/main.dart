@@ -10,10 +10,11 @@ import 'package:flutter_highlight/themes/atom-one-light.dart';
 import 'package:flutter_highlight/themes/github.dart';
 import 'package:flutter_highlight/themes/monokai.dart';
 import 'package:flutter_highlight/themes/vs2015.dart';
+import 'package:file_picker/file_picker.dart';
 import 'settings_screen.dart';
 import 'about_screen.dart';
+import 'terminal_screen.dart';
 
-// ================= APP ENTRY =================
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const PyIDEApp());
@@ -48,14 +49,13 @@ class PyIDEApp extends StatelessWidget {
   }
 }
 
-// ================= DATA MODEL =================
 class EditorTabData {
   String name;
   String content;
-  EditorTabData({required this.name, required this.content});
+  String? path;
+  EditorTabData({required this.name, required this.content, this.path});
 }
 
-// ================= MAIN SCAFFOLD =================
 class MainScaffold extends StatefulWidget {
   const MainScaffold({super.key});
 
@@ -64,9 +64,9 @@ class MainScaffold extends StatefulWidget {
 }
 
 class _MainScaffoldState extends State<MainScaffold> {
-  // Runtime
   static const MethodChannel _channel =
       MethodChannel('com.sonnamidevs.s_code/native');
+
   bool _isSetupComplete = false;
   bool _isRunning = false;
   bool _hasError = false;
@@ -74,32 +74,27 @@ class _MainScaffoldState extends State<MainScaffold> {
   String? _nativeLibDir;
   String? _pythonRoot;
 
-  // Editor
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
-  final ScrollController _editorScroll = ScrollController();
   bool _isAutoIndenting = false;
   bool _showLineNumbers = true;
 
-  // Tabs
   final List<EditorTabData> _tabs = [];
   int _activeTab = 0;
 
-  // UI state
-  double _fontSize = 14;
+  double _fontSize = 13;
   String _themeName = 'atom-one-dark';
-  double _consoleFraction = 0.35;
+  double _consoleFraction = 0.32;
   bool _showConsole = true;
   bool _showSpecialKeys = false;
   bool _ctrlActive = false;
   bool _shiftActive = false;
   bool _altActive = false;
   int _sidebarIndex = 0;
+  int _lastHighlightedLine = -1;
 
-  // Console
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _outputScroll = ScrollController();
-
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   static const Map<String, Map<String, TextStyle>> _themes = {
@@ -138,7 +133,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
   void initState() {
     super.initState();
     _codeController = CodeController(text: _welcomeCode, language: python);
-    _codeController.addListener(_onCodeChanged);
+    _codeController.addListener(_onControllerChanged);
     _tabs.add(EditorTabData(name: 'main.py', content: _welcomeCode));
     _loadPrefs();
     _setupPython();
@@ -148,24 +143,35 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _fontSize = p.getDouble('font_size') ?? 14.0;
+      _fontSize = p.getDouble('font_size') ?? 13.0;
       _themeName = p.getString('theme') ?? 'atom-one-dark';
       _showLineNumbers = p.getBool('show_line_numbers') ?? true;
     });
   }
 
-  // ================= AUTO-INDENT =================
-  void _onCodeChanged() {
+  // ================= CONTROLLER LISTENER (auto-indent + line highlight) =====
+  void _onControllerChanged() {
+    // Line highlight
+    final pos = _codeController.selection.baseOffset;
+    if (pos >= 0 && pos <= _codeController.text.length) {
+      final line =
+          '\n'.allMatches(_codeController.text.substring(0, pos)).length;
+      if (line != _lastHighlightedLine) {
+        _lastHighlightedLine = line;
+      }
+    }
+
+    // Auto-indent
     if (_isAutoIndenting) return;
     final value = _codeController.value;
     final text = value.text;
     final sel = value.selection;
     if (!sel.isValid || !sel.isCollapsed) return;
-    final pos = sel.baseOffset;
-    if (pos <= 0 || pos > text.length) return;
-    if (text[pos - 1] != '\n') return;
+    final p = sel.baseOffset;
+    if (p <= 0 || p > text.length) return;
+    if (text[p - 1] != '\n') return;
 
-    final before = text.substring(0, pos - 1);
+    final before = text.substring(0, p - 1);
     final lastNl = before.lastIndexOf('\n');
     final prevLine = lastNl == -1 ? before : before.substring(lastNl + 1);
     if (prevLine.trim().isEmpty) return;
@@ -178,8 +184,8 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     _isAutoIndenting = true;
     try {
       _codeController.value = value.copyWith(
-        text: text.substring(0, pos) + indent + text.substring(pos),
-        selection: TextSelection.collapsed(offset: pos + indent.length),
+        text: text.substring(0, p) + indent + text.substring(p),
+        selection: TextSelection.collapsed(offset: p + indent.length),
         composing: TextRange.empty,
       );
     } finally {
@@ -191,7 +197,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
   Future<void> _setupPython() async {
     try {
       setState(() {
-        _statusMessage = 'Locating native directory...';
+        _statusMessage = 'Locating...';
         _hasError = false;
       });
       _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
@@ -232,7 +238,7 @@ rm -rf _tmp
         final check =
             File('${root.path}/lib/python3.14/encodings/__init__.py');
         if (!check.existsSync()) {
-          throw Exception('encodings module missing');
+          throw Exception('encodings missing');
         }
         await marker.writeAsString('v7');
       }
@@ -244,7 +250,7 @@ rm -rf _tmp
     } catch (e) {
       setState(() {
         _hasError = true;
-        _statusMessage = 'Setup failed: $e';
+        _statusMessage = 'Setup failed';
       });
       _append('Setup failed: $e');
     }
@@ -263,7 +269,7 @@ rm -rf _tmp
 
     _append('');
     _append('▶ ${DateTime.now().toString().substring(11, 19)} — Running');
-    _append('─' * 44);
+    _append('─' * 40);
 
     final scriptFile = File('$_pythonRoot/script.py');
     await scriptFile.writeAsString(_codeController.text);
@@ -276,7 +282,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 "$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"
 ''';
       final result = await Process.run('/bin/sh', ['-c', cmd]);
-
       if ((result.stdout as String).isNotEmpty) {
         _append(result.stdout as String);
       }
@@ -284,7 +289,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         _append('--- stderr ---');
         _append(result.stderr as String);
       }
-      _append('─' * 44);
+      _append('─' * 40);
       _append('Exit ${result.exitCode}  ${result.exitCode == 0 ? "✓" : "✗"}');
     } catch (e) {
       _append('Run error: $e');
@@ -308,7 +313,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 
   void _clearConsole() => setState(() => _outputController.clear());
 
-  // ================= TEXT INSERTION =================
   void _insertText(String text) {
     final value = _codeController.value;
     final sel = value.selection;
@@ -359,7 +363,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 
   Future<void> _saveCurrentFile() async {
     _tabs[_activeTab].content = _codeController.text;
-    final f = File('$_pythonRoot/${_tabs[_activeTab].name}');
+    final targetPath = _tabs[_activeTab].path ??
+        '$_pythonRoot/${_tabs[_activeTab].name}';
+    final f = File(targetPath);
     await f.writeAsString(_tabs[_activeTab].content);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -372,11 +378,41 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     }
   }
 
+  // ================= OPEN FILE FROM DEVICE =================
+  Future<void> _openFileFromDevice() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: false,
+      );
+      if (result == null || result.files.single.path == null) return;
+      final path = result.files.single.path!;
+      final content = await File(path).readAsString();
+      final name = path.split('/').last;
+      _tabs[_activeTab].content = _codeController.text;
+      setState(() {
+        _tabs.add(
+            EditorTabData(name: name, content: content, path: path));
+        _activeTab = _tabs.length - 1;
+      });
+      _codeController.text = content;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open file: $e')),
+        );
+      }
+    }
+  }
+
   // ================= MENU =================
   Future<void> _handleMenu(String v) async {
     switch (v) {
       case 'new':
         _newFile();
+        break;
+      case 'files':
+        await _openFileFromDevice();
         break;
       case 'save':
         await _saveCurrentFile();
@@ -384,8 +420,8 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       case 'close':
         _closeTab(_activeTab);
         break;
-      case 'console':
-        setState(() => _showConsole = !_showConsole);
+      case 'terminal':
+        _openTerminal();
         break;
       case 'settings':
         _openSettings();
@@ -405,21 +441,35 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     }
   }
 
+  void _openTerminal() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TerminalScreen(
+          pythonRoot: _pythonRoot,
+          nativeLibDir: _nativeLibDir,
+        ),
+      ),
+    );
+  }
+
   void _showHelp() {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: const Color(0xFF252526),
         title: const Text('PyIDE — Help',
-            style: TextStyle(color: Color(0xFFD4D4D4))),
+            style: TextStyle(color: Color(0xFFD4D4D4), fontSize: 15)),
         content: const Text(
-          '• Run: tap ▶ in the app bar\n'
-          '• Save: tap the pencil icon\n'
-          '• Auto-indent: after a line ending in :\n'
-          '• Resize console: drag the small handle\n'
+          '• Run: ▶ icon in the app bar\n'
+          '• Save: pencil icon\n'
+          '• Files: tap ⋮ → Files\n'
+          '• Terminal: tap ⋮ → Terminal\n'
+          '• Resize console: drag the handle\n'
           '• Special keys: long-press the ▲ button\n'
-          '• Settings: three-dot menu → Settings',
-          style: TextStyle(height: 1.6, color: Color(0xFFCCCCCC)),
+          '• Toggle console: tap the ▲ button',
+          style: TextStyle(
+              height: 1.6, color: Color(0xFFCCCCCC), fontSize: 13),
         ),
         actions: [
           TextButton(
@@ -449,10 +499,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
 
   @override
   void dispose() {
-    _codeController.removeListener(_onCodeChanged);
+    _codeController.removeListener(_onControllerChanged);
     _codeController.dispose();
     _editorFocus.dispose();
-    _editorScroll.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
     super.dispose();
@@ -461,11 +510,13 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   // ================= BUILD =================
   @override
   Widget build(BuildContext context) {
+    final viewInsets = MediaQuery.of(context).viewInsets.bottom;
     return Scaffold(
       key: _scaffoldKey,
+      resizeToAvoidBottomInset: false,
       drawer: Drawer(
         backgroundColor: const Color(0xFF1E1E1E),
-        width: MediaQuery.of(context).size.width * 0.85,
+        width: MediaQuery.of(context).size.width * 0.82,
         child: SidebarContent(
           activeIndex: _sidebarIndex,
           onIndexChanged: (i) => setState(() => _sidebarIndex = i),
@@ -479,35 +530,46 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       ),
       appBar: _buildAppBar(),
       body: SafeArea(
-        child: Column(
+        bottom: false,
+        child: Stack(
           children: [
-            _buildFileTabs(),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final total = constraints.maxHeight;
-                  final consoleH =
-                      (_showConsole ? total * _consoleFraction : 0).toDouble();
-                  final editorH = total - consoleH - (_showConsole ? 14 : 0);
+            Column(
+              children: [
+                _buildFileTabs(),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final total = constraints.maxHeight;
+                      final consoleH = (_showConsole
+                              ? total * _consoleFraction
+                              : 0)
+                          .toDouble();
+                      final editorH = total -
+                          consoleH -
+                          (_showConsole ? 12 : 0);
 
-                  return Column(
-                    children: [
-                      SizedBox(
-                        height: editorH,
-                        child: _buildEditor(),
-                      ),
-                      if (_showConsole) _buildDragHandle(total),
-                      if (_showConsole)
-                        SizedBox(
-                          height: consoleH,
-                          child: _buildConsole(),
-                        ),
-                      if (_showSpecialKeys) _buildSpecialKeysBar(),
-                    ],
-                  );
-                },
-              ),
+                      return Column(
+                        children: [
+                          SizedBox(height: editorH, child: _buildEditor()),
+                          if (_showConsole) _buildDragHandle(total),
+                          if (_showConsole)
+                            SizedBox(
+                                height: consoleH, child: _buildConsole()),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
+            // Special keys — floats above the keyboard
+            if (_showSpecialKeys)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: viewInsets,
+                child: _buildSpecialKeysBar(),
+              ),
           ],
         ),
       ),
@@ -519,9 +581,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       backgroundColor: const Color(0xFF1E1E1E),
-      toolbarHeight: 52,
+      toolbarHeight: 48,
       leading: IconButton(
-        icon: const Icon(Icons.menu, color: Color(0xFFCCCCCC)),
+        icon: const Icon(Icons.menu, color: Color(0xFFCCCCCC), size: 20),
         onPressed: () => _scaffoldKey.currentState?.openDrawer(),
       ),
       titleSpacing: 0,
@@ -531,30 +593,20 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             const Padding(
               padding: EdgeInsets.only(right: 8),
               child: SizedBox(
-                width: 12,
-                height: 12,
+                width: 10,
+                height: 10,
                 child: CircularProgressIndicator(
                     strokeWidth: 1.5, color: Color(0xFFD29922)),
               ),
             ),
           if (_hasError)
-            GestureDetector(
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(_statusMessage),
-                    backgroundColor: const Color(0xFFF85149),
-                  ),
-                );
-              },
-              child: Container(
-                width: 10,
-                height: 10,
-                margin: const EdgeInsets.only(right: 8),
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color(0xFFF85149),
-                ),
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(0xFFF85149),
               ),
             ),
           Flexible(
@@ -562,7 +614,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               _tabs[_activeTab].name,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                fontSize: 14,
+                fontSize: 13.5,
                 fontWeight: FontWeight.w500,
                 color: Color(0xFFD4D4D4),
               ),
@@ -573,39 +625,45 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       actions: [
         IconButton(
           icon: const Icon(Icons.edit_outlined,
-              color: Color(0xFFCCCCCC), size: 20),
+              color: Color(0xFFCCCCCC), size: 18),
           onPressed: _saveCurrentFile,
           tooltip: 'Save',
         ),
         IconButton(
           icon: _isRunning
               ? const SizedBox(
-                  width: 18,
-                  height: 18,
+                  width: 16,
+                  height: 16,
                   child: CircularProgressIndicator(
                       strokeWidth: 2, color: Color(0xFF4A9EFF)),
                 )
               : const Icon(Icons.play_arrow_rounded,
-                  color: Color(0xFF4A9EFF), size: 26),
+                  color: Color(0xFF4A9EFF), size: 24),
           onPressed: _isSetupComplete && !_isRunning ? _runCode : null,
           tooltip: 'Run',
         ),
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert,
-              color: Color(0xFFCCCCCC), size: 20),
+              color: Color(0xFFCCCCCC), size: 18),
           color: const Color(0xFF2D2D30),
           onSelected: _handleMenu,
           itemBuilder: (_) => const [
             PopupMenuItem(
-                value: 'new', child: _MenuRow(Icons.add, 'New file')),
+                value: 'new',
+                child: _MenuRow(Icons.add, 'New file')),
             PopupMenuItem(
-                value: 'save', child: _MenuRow(Icons.save_outlined, 'Save')),
+                value: 'files',
+                child: _MenuRow(Icons.folder_open, 'Files')),
+            PopupMenuItem(
+                value: 'save',
+                child: _MenuRow(Icons.save_outlined, 'Save')),
             PopupMenuItem(
                 value: 'close',
                 child: _MenuRow(Icons.close, 'Close file')),
+            PopupMenuDivider(),
             PopupMenuItem(
-                value: 'console',
-                child: _MenuRow(Icons.terminal, 'Toggle console')),
+                value: 'terminal',
+                child: _MenuRow(Icons.terminal, 'Terminal')),
             PopupMenuDivider(),
             PopupMenuItem(
                 value: 'settings',
@@ -618,7 +676,8 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                 child: _MenuRow(Icons.help_outline, 'Help')),
             PopupMenuDivider(),
             PopupMenuItem(
-                value: 'exit', child: _MenuRow(Icons.logout, 'Exit')),
+                value: 'exit',
+                child: _MenuRow(Icons.logout, 'Exit')),
           ],
         ),
       ],
@@ -628,7 +687,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   // ================= FILE TABS =================
   Widget _buildFileTabs() {
     return Container(
-      height: 36,
+      height: 33,
       color: const Color(0xFF252526),
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
@@ -638,7 +697,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           return GestureDetector(
             onTap: () => _switchTab(i),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 11),
               decoration: BoxDecoration(
                 color: active
                     ? const Color(0xFF1E1E1E)
@@ -655,22 +714,22 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               child: Row(
                 children: [
                   const Icon(Icons.description_outlined,
-                      size: 13, color: Color(0xFF4A9EFF)),
-                  const SizedBox(width: 7),
+                      size: 12, color: Color(0xFF4A9EFF)),
+                  const SizedBox(width: 6),
                   Text(
                     _tabs[i].name,
                     style: TextStyle(
-                      fontSize: 12.5,
+                      fontSize: 11.5,
                       color: active
                           ? const Color(0xFFD4D4D4)
                           : const Color(0xFF888888),
                     ),
                   ),
-                  const SizedBox(width: 7),
+                  const SizedBox(width: 6),
                   GestureDetector(
                     onTap: () => _closeTab(i),
                     child: const Icon(Icons.close,
-                        size: 13, color: Color(0xFF888888)),
+                        size: 12, color: Color(0xFF888888)),
                   ),
                 ],
               ),
@@ -690,19 +749,21 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         child: CodeField(
           controller: _codeController,
           focusNode: _editorFocus,
+          expands: true,
+          wrap: false,
           textStyle: TextStyle(
             fontFamily: 'monospace',
             fontSize: _fontSize,
             height: 1.5,
           ),
           gutterStyle: GutterStyle(
-            width: _showLineNumbers ? 46 : 0,
+            width: _showLineNumbers ? 40 : 0,
             showLineNumbers: _showLineNumbers,
             showErrors: false,
             showFoldingHandles: _showLineNumbers,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize,
+              fontSize: _fontSize - 0.5,
               height: 1.5,
               color: const Color(0xFF5C6370),
             ),
@@ -716,9 +777,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
   Widget _buildDragHandle(double total) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onVerticalDragUpdate: (details) {
+      onVerticalDragUpdate: (d) {
         setState(() {
-          _consoleFraction -= details.delta.dy / total;
+          _consoleFraction -= d.delta.dy / total;
           _consoleFraction = _consoleFraction.clamp(0.1, 0.85);
         });
       },
@@ -728,7 +789,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         });
       },
       child: Container(
-        height: 14,
+        height: 12,
         color: const Color(0xFF1E1E1E),
         child: Center(
           child: Container(
@@ -751,12 +812,13 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       child: Column(
         children: [
           Container(
-            height: 32,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
             color: const Color(0xFF252526),
             child: Row(
               children: [
-                _smallBtn(Icons.backspace_outlined, 'Clear', _clearConsole),
+                _smallBtn(
+                    Icons.backspace_outlined, 'Clear', _clearConsole),
                 _smallBtn(Icons.keyboard_hide_outlined, 'Hide keyboard', () {
                   FocusScope.of(context).unfocus();
                 }),
@@ -779,14 +841,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           ),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(8),
               child: _outputController.text.isEmpty
                   ? const Center(
                       child: Text(
                         'Output will appear here...',
                         style: TextStyle(
                           fontFamily: 'monospace',
-                          fontSize: 12,
+                          fontSize: 11,
                           color: Color(0xFF5A5A5A),
                         ),
                       ),
@@ -797,7 +859,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                         _outputController.text,
                         style: const TextStyle(
                           fontFamily: 'monospace',
-                          fontSize: 12,
+                          fontSize: 11,
                           height: 1.5,
                           color: Color(0xFFD4D4D4),
                         ),
@@ -810,15 +872,15 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     );
   }
 
-  Widget _smallBtn(IconData icon, String tooltip, VoidCallback onTap) {
+  Widget _smallBtn(IconData icon, String tip, VoidCallback onTap) {
     return Tooltip(
-      message: tooltip,
+      message: tip,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(4),
         child: Padding(
           padding: const EdgeInsets.all(5),
-          child: Icon(icon, size: 15, color: const Color(0xFFCCCCCC)),
+          child: Icon(icon, size: 14, color: const Color(0xFFCCCCCC)),
         ),
       ),
     );
@@ -865,90 +927,95 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     ];
 
     return Container(
-      height: 46,
-      color: const Color(0xFF252526),
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        itemCount: keys.length + 1,
-        itemBuilder: (_, i) {
-          if (i == keys.length) {
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: InkWell(
-                onTap: () => setState(() => _showSpecialKeys = false),
-                borderRadius: BorderRadius.circular(6),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF30363D),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Center(
-                    child: Icon(Icons.close,
-                        size: 14, color: Color(0xFFCCCCCC)),
-                  ),
-                ),
-              ),
-            );
-          }
+      height: 42,
+      decoration: BoxDecoration(
+        color: const Color(0xFF252526),
+        border: Border(
+          top: BorderSide(color: const Color(0xFF1E1E1E), width: 1),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              itemCount: keys.length,
+              itemBuilder: (_, i) {
+                final k = keys[i];
+                final type = k['type']!;
+                final id = k['id'];
+                final active = (id == 'ctrl' && _ctrlActive) ||
+                    (id == 'shift' && _shiftActive) ||
+                    (id == 'alt' && _altActive);
 
-          final k = keys[i];
-          final type = k['type']!;
-          final id = k['id'];
-          final isModActive = (id == 'ctrl' && _ctrlActive) ||
-              (id == 'shift' && _shiftActive) ||
-              (id == 'alt' && _altActive);
-
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 3),
-            child: InkWell(
-              onTap: () {
-                if (type == 'mod') {
-                  setState(() {
-                    if (id == 'ctrl') _ctrlActive = !_ctrlActive;
-                    if (id == 'shift') _shiftActive = !_shiftActive;
-                    if (id == 'alt') _altActive = !_altActive;
-                  });
-                } else {
-                  _insertText(k['insert'] ?? '');
-                }
-              },
-              borderRadius: BorderRadius.circular(6),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isModActive
-                      ? const Color(0xFF4A9EFF).withOpacity(0.25)
-                      : const Color(0xFF2D2D30),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: isModActive
-                        ? const Color(0xFF4A9EFF)
-                        : Colors.transparent,
-                    width: 1,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    k['label']!,
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: isModActive
-                          ? const Color(0xFF4A9EFF)
-                          : const Color(0xFFD4D4D4),
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: InkWell(
+                    onTap: () {
+                      if (type == 'mod') {
+                        setState(() {
+                          if (id == 'ctrl') _ctrlActive = !_ctrlActive;
+                          if (id == 'shift') _shiftActive = !_shiftActive;
+                          if (id == 'alt') _altActive = !_altActive;
+                        });
+                      } else {
+                        _insertText(k['insert'] ?? '');
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(5),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 9, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: active
+                            ? const Color(0xFF4A9EFF).withOpacity(0.25)
+                            : const Color(0xFF2D2D30),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(
+                          color: active
+                              ? const Color(0xFF4A9EFF)
+                              : Colors.transparent,
+                          width: 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          k['label']!,
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: active
+                                ? const Color(0xFF4A9EFF)
+                                : const Color(0xFFD4D4D4),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
+                );
+              },
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() => _showSpecialKeys = false),
+            child: Container(
+              width: 42,
+              height: 42,
+              decoration: const BoxDecoration(
+                color: Color(0xFF2D2D30),
+                border: Border(
+                  left: BorderSide(color: Color(0xFF1E1E1E)),
                 ),
               ),
+              child: const Center(
+                child: Icon(Icons.close,
+                    size: 14, color: Color(0xFFCCCCCC)),
+              ),
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
@@ -965,14 +1032,15 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         backgroundColor: const Color(0xFF2D2D30),
         elevation: 3,
         onPressed: () {
-          if (_editorFocus.hasFocus) {
-            FocusScope.of(context).unfocus();
-          } else {
-            _editorFocus.requestFocus();
-          }
+          HapticFeedback.lightImpact();
+          setState(() => _showConsole = !_showConsole);
         },
-        child: const Icon(Icons.keyboard_arrow_up,
-            color: Color(0xFFCCCCCC)),
+        child: Icon(
+          _showConsole
+              ? Icons.keyboard_arrow_down
+              : Icons.keyboard_arrow_up,
+          color: const Color(0xFFCCCCCC),
+        ),
       ),
     );
   }
@@ -988,10 +1056,11 @@ class _MenuRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, size: 17, color: const Color(0xFFCCCCCC)),
+        Icon(icon, size: 16, color: const Color(0xFFCCCCCC)),
         const SizedBox(width: 12),
         Text(label,
-            style: const TextStyle(fontSize: 13.5, color: Color(0xFFD4D4D4))),
+            style: const TextStyle(
+                fontSize: 13, color: Color(0xFFD4D4D4))),
       ],
     );
   }
@@ -1017,16 +1086,16 @@ class SidebarContent extends StatelessWidget {
     return Row(
       children: [
         Container(
-          width: 54,
+          width: 50,
           color: const Color(0xFF181818),
           child: Column(
             children: [
               const SizedBox(height: 30),
-              _stripIcon(Icons.folder_outlined, 0, 'Files'),
-              _stripIcon(Icons.search, 1, 'Search'),
-              _stripIcon(Icons.notifications_none, 2, 'Notifications'),
-              _stripIcon(Icons.favorite_border, 3, 'Favorites'),
-              _stripIcon(Icons.person_outline, 4, 'Profile'),
+              _strip(Icons.folder_outlined, 0, 'Files'),
+              _strip(Icons.search, 1, 'Search'),
+              _strip(Icons.notifications_none, 2, 'Alerts'),
+              _strip(Icons.favorite_border, 3, 'Favorites'),
+              _strip(Icons.person_outline, 4, 'Profile'),
             ],
           ),
         ),
@@ -1040,27 +1109,30 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
-  Widget _stripIcon(IconData icon, int index, String tooltip) {
+  Widget _strip(IconData icon, int index, String tip) {
     final active = activeIndex == index;
     return Tooltip(
-      message: tooltip,
+      message: tip,
       child: InkWell(
         onTap: () => onIndexChanged(index),
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
+          padding: const EdgeInsets.symmetric(vertical: 13),
           decoration: BoxDecoration(
             border: Border(
               left: BorderSide(
-                color:
-                    active ? const Color(0xFF4A9EFF) : Colors.transparent,
+                color: active
+                    ? const Color(0xFF4A9EFF)
+                    : Colors.transparent,
                 width: 3,
               ),
             ),
           ),
           child: Icon(
             icon,
-            size: 20,
-            color: active ? const Color(0xFFD4D4D4) : const Color(0xFF6A6A6A),
+            size: 19,
+            color: active
+                ? const Color(0xFFD4D4D4)
+                : const Color(0xFF6A6A6A),
           ),
         ),
       ),
@@ -1072,11 +1144,11 @@ class SidebarContent extends StatelessWidget {
       case 0:
         return _filesPanel();
       case 1:
-        return _placeholder('SEARCH', Icons.search,
-            'Search across files coming soon.');
+        return _placeholder(
+            'SEARCH', Icons.search, 'Search across files coming soon.');
       case 2:
-        return _placeholder('NOTIFICATIONS', Icons.notifications_none,
-            'No new notifications.');
+        return _placeholder(
+            'ALERTS', Icons.notifications_none, 'No new notifications.');
       case 3:
         return _placeholder(
             'FAVORITES', Icons.favorite_border, 'No favorites yet.');
@@ -1092,10 +1164,10 @@ class SidebarContent extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(16, 20, 16, 10),
+          padding: EdgeInsets.fromLTRB(14, 20, 14, 10),
           child: Text('FILES',
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 10,
                 letterSpacing: 1.5,
                 fontWeight: FontWeight.bold,
                 color: Color(0xFF888888),
@@ -1106,17 +1178,22 @@ class SidebarContent extends StatelessWidget {
               ? const Center(
                   child: Text('No files open',
                       style: TextStyle(
-                          fontSize: 12, color: Color(0xFF666666))),
+                          fontSize: 11.5, color: Color(0xFF666666))),
                 )
               : ListView(
+                  padding: EdgeInsets.zero,
                   children: files
                       .map((f) => ListTile(
                             dense: true,
-                            leading: const Icon(Icons.description_outlined,
-                                size: 17, color: Color(0xFF4A9EFF)),
+                            visualDensity:
+                                const VisualDensity(vertical: -3),
+                            leading: const Icon(
+                                Icons.description_outlined,
+                                size: 16,
+                                color: Color(0xFF4A9EFF)),
                             title: Text(f,
                                 style: const TextStyle(
-                                    fontSize: 12.5,
+                                    fontSize: 12,
                                     color: Color(0xFFD4D4D4))),
                             onTap: () => onFileTap(f),
                           ))
@@ -1131,12 +1208,12 @@ class SidebarContent extends StatelessWidget {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
+          padding: const EdgeInsets.fromLTRB(14, 20, 14, 10),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(title,
                 style: const TextStyle(
-                  fontSize: 11,
+                  fontSize: 10,
                   letterSpacing: 1.5,
                   fontWeight: FontWeight.bold,
                   color: Color(0xFF888888),
@@ -1148,14 +1225,14 @@ class SidebarContent extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 40, color: const Color(0xFF444444)),
-                const SizedBox(height: 12),
+                Icon(icon, size: 36, color: const Color(0xFF444444)),
+                const SizedBox(height: 10),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Text(msg,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                          fontSize: 12.5, color: Color(0xFF888888))),
+                          fontSize: 11.5, color: Color(0xFF888888))),
                 ),
               ],
             ),
@@ -1167,15 +1244,14 @@ class SidebarContent extends StatelessWidget {
 
   Widget _profilePanel(BuildContext context) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(16, 20, 16, 10),
+          padding: EdgeInsets.fromLTRB(14, 20, 14, 10),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text('PROFILE',
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 10,
                   letterSpacing: 1.5,
                   fontWeight: FontWeight.bold,
                   color: Color(0xFF888888),
@@ -1184,13 +1260,13 @@ class SidebarContent extends StatelessWidget {
         ),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
+            padding: const EdgeInsets.symmetric(horizontal: 18),
             child: Column(
               children: [
                 const SizedBox(height: 20),
                 Container(
-                  width: 76,
-                  height: 76,
+                  width: 68,
+                  height: 68,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: const Color(0xFF2D2D30),
@@ -1198,35 +1274,35 @@ class SidebarContent extends StatelessWidget {
                         color: const Color(0xFF3A3A3A), width: 1.5),
                   ),
                   child: const Icon(Icons.person_outline,
-                      size: 34, color: Color(0xFF6A6A6A)),
+                      size: 30, color: Color(0xFF6A6A6A)),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
                 const Text(
                   'Not signed in',
                   style: TextStyle(
-                    fontSize: 14,
+                    fontSize: 13,
                     color: Color(0xFFD4D4D4),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 5),
                 const Text(
                   'Sign in to sync your files across devices.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11.5,
                     color: Color(0xFF888888),
                     height: 1.5,
                   ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 18),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF4A9EFF),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(8),
                       ),
@@ -1234,21 +1310,20 @@ class SidebarContent extends StatelessWidget {
                     onPressed: () {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Sign-in coming soon'),
-                          duration: Duration(seconds: 2),
-                        ),
+                            content: Text('Sign-in coming soon')),
                       );
                     },
-                    child: const Text('Sign in'),
+                    child: const Text('Sign in',
+                        style: TextStyle(fontSize: 13)),
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton(
                     style: OutlinedButton.styleFrom(
                       foregroundColor: const Color(0xFFCCCCCC),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
                       side: const BorderSide(color: Color(0xFF3A3A3A)),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(8),
@@ -1257,12 +1332,11 @@ class SidebarContent extends StatelessWidget {
                     onPressed: () {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Create account coming soon'),
-                          duration: Duration(seconds: 2),
-                        ),
+                            content: Text('Create account coming soon')),
                       );
                     },
-                    child: const Text('Create account'),
+                    child: const Text('Create account',
+                        style: TextStyle(fontSize: 13)),
                   ),
                 ),
               ],
