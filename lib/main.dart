@@ -80,7 +80,6 @@ class _MainScaffoldState extends State<MainScaffold>
 
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
-  final ScrollController _editorScroll = ScrollController();
   bool _isAutoIndenting = false;
   bool _showLineNumbers = true;
 
@@ -183,12 +182,12 @@ print(f"2 + 3 = {calc.add(2, 3)}")
         }
       } catch (_) {}
     }
-    // First launch — insert welcome file
     _tabs.add(EditorTabData(name: 'main.py', content: _welcomeCode));
     _codeController.text = _welcomeCode;
   }
 
   Future<void> _saveTabs() async {
+    if (_tabs.isEmpty) return;
     _tabs[_activeTab].content = _codeController.text;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -494,7 +493,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _codeController.removeListener(_onControllerChanged);
     _codeController.dispose();
     _editorFocus.dispose();
-    _editorScroll.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
     super.dispose();
@@ -737,31 +735,26 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
         data: CodeThemeData(styles: _themeStyles),
-        child: Scrollbar(
-          controller: _editorScroll,
-          thumbVisibility: true,
-          child: CodeField(
-            controller: _codeController,
-            focusNode: _editorFocus,
-            scrollController: _editorScroll,
-            expands: true,
-            wrap: true,
+        child: CodeField(
+          controller: _codeController,
+          focusNode: _editorFocus,
+          expands: true,
+          wrap: true,
+          textStyle: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: _fontSize,
+            height: 1.5,
+          ),
+          gutterStyle: GutterStyle(
+            width: _showLineNumbers ? 36 : 0,
+            showLineNumbers: _showLineNumbers,
+            showErrors: false,
+            showFoldingHandles: false,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize,
+              fontSize: _fontSize - 1,
               height: 1.5,
-            ),
-            gutterStyle: GutterStyle(
-              width: _showLineNumbers ? 36 : 0,
-              showLineNumbers: _showLineNumbers,
-              showErrors: false,
-              showFoldingHandles: false,
-              textStyle: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: _fontSize - 1,
-                height: 1.5,
-                color: const Color(0xFF5C6370),
-              ),
+              color: const Color(0xFF5C6370),
             ),
           ),
         ),
