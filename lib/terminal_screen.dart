@@ -32,7 +32,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _print('Welcome to PyIDE Terminal');
     _print('');
     _print('Type "help" for available commands.');
-    _print('Type "pip install <package>" to install Python packages.');
     _print('');
   }
 
@@ -54,6 +53,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   Map<String, String> _env() {
     const systemPath = '/system/bin:/system/xbin:/vendor/bin:/product/bin';
+    final libPath = widget.pythonRoot != null
+        ? '${widget.pythonRoot}/lib'
+        : null;
     final env = <String, String>{
       'PATH': systemPath,
       'HOME': widget.pythonRoot ?? '/',
@@ -64,7 +66,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
     if (widget.pythonRoot != null && widget.nativeLibDir != null) {
       env['PYTHONHOME'] = widget.pythonRoot!;
       env['PYTHONPATH'] = '${widget.pythonRoot}/lib/python3.14';
-      env['LD_LIBRARY_PATH'] = widget.nativeLibDir!;
+      env['LD_LIBRARY_PATH'] =
+          '$libPath:${widget.nativeLibDir}:$systemPath';
       env['PATH'] =
           '${widget.pythonRoot}/bin:${widget.nativeLibDir}:$systemPath';
     }
@@ -118,15 +121,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
     String actualCmd = cmd;
     if (cmd == 'pip' || cmd.startsWith('pip ')) {
-      final py = '${widget.pythonRoot}/lib/python3.14';
       final pythonBin = widget.nativeLibDir != null
           ? '${widget.nativeLibDir}/libpython3-exec.so'
           : 'python3';
       final args = cmd.length > 3 ? cmd.substring(3).trim() : '';
-      final envStr = widget.nativeLibDir != null
-          ? 'PYTHONHOME="${widget.pythonRoot}" PYTHONPATH="$py" LD_LIBRARY_PATH="${widget.nativeLibDir}" '
-          : '';
-      actualCmd = '$envStr"$pythonBin" -m pip $args';
+      actualCmd = '"$pythonBin" -m pip $args';
     }
 
     try {

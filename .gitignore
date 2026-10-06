@@ -10,3 +10,6 @@ local.properties
 .flutter-plugins-dependencies
 .dart_tool/
 .dart_tool/
+# Firebase
+android/app/google-services.json
+**/google-services.json

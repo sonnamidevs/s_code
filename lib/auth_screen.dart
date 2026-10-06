@@ -3,7 +3,12 @@ import 'auth_service.dart';
 
 class AuthScreen extends StatefulWidget {
   final VoidCallback onSignedIn;
-  const AuthScreen({super.key, required this.onSignedIn});
+  final bool allowSkip;
+  const AuthScreen({
+    super.key,
+    required this.onSignedIn,
+    this.allowSkip = false,
+  });
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -38,6 +43,7 @@ class _AuthScreenState extends State<AuthScreen>
       email: _emailCtrl.text,
       password: _passwordCtrl.text,
     );
+    if (!mounted) return;
     setState(() => _loading = false);
     if (r.success) {
       widget.onSignedIn();
@@ -55,6 +61,7 @@ class _AuthScreenState extends State<AuthScreen>
       email: _signInEmailCtrl.text,
       password: _signInPasswordCtrl.text,
     );
+    if (!mounted) return;
     setState(() => _loading = false);
     if (r.success) {
       widget.onSignedIn();
@@ -78,6 +85,17 @@ class _AuthScreenState extends State<AuthScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A1A),
+      appBar: widget.allowSkip
+          ? AppBar(
+              backgroundColor: const Color(0xFF1A1A1A),
+              elevation: 0,
+              iconTheme: const IconThemeData(color: Color(0xFFAAAAAA)),
+              leading: IconButton(
+                icon: const Icon(Icons.close, size: 20),
+                onPressed: () => Navigator.pop(context),
+              ),
+            )
+          : null,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -122,9 +140,9 @@ class _AuthScreenState extends State<AuthScreen>
                   ),
                   const SizedBox(height: 4),
                   const Text(
-                    'Python IDE for Android',
-                    style: TextStyle(
-                        fontSize: 12.5, color: Color(0xFF7A7A7A)),
+                    'Sign in to collaborate in real time',
+                    style:
+                        TextStyle(fontSize: 12.5, color: Color(0xFF7A7A7A)),
                   ),
                   const SizedBox(height: 30),
                   Container(
@@ -153,7 +171,7 @@ class _AuthScreenState extends State<AuthScreen>
                   ),
                   const SizedBox(height: 20),
                   SizedBox(
-                    height: 260,
+                    height: 270,
                     child: TabBarView(
                       controller: _tabs,
                       children: [_signInForm(), _signUpForm()],
@@ -178,9 +196,9 @@ class _AuthScreenState extends State<AuthScreen>
                       ),
                     ),
                   ],
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 16),
                   const Text(
-                    'Your data stays on your device.',
+                    'Free forever. No card required.',
                     style: TextStyle(fontSize: 11, color: Color(0xFF666666)),
                   ),
                 ],

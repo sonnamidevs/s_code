@@ -16,32 +16,35 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
   final _sessionController = TextEditingController();
 
   bool _isConnecting = false;
-  int _userCount = 0;
-  String _myName = '';
+  Map<String, CollabUser> _users = {};
+  String? _mySessionId;
 
   @override
   void initState() {
     super.initState();
-    _myName = AuthService().currentUser?.username ?? 'Anonymous';
-    _service.status.listen((s) {});
-    _service.messages.listen((msg) {
-      if (msg.type == 'code' && widget.onContentReceived != null) {
-        widget.onContentReceived!(msg.content ?? '');
+    _service.usersStream.listen((users) {
+      if (mounted) setState(() => _users = users);
+    });
+    _service.codeStream.listen((code) {
+      if (widget.onContentReceived != null) {
+        widget.onContentReceived!(code);
       }
-      if (mounted) setState(() => _userCount = _service.users.length);
     });
   }
 
   Future<void> _host() async {
-    final id = CollaborationService.generateSessionId();
-    _sessionController.text = id;
     setState(() => _isConnecting = true);
-    final ok = await _service.join(sessionId: id, userName: _myName);
-    if (mounted) setState(() => _isConnecting = false);
+    final ok = await _service.createSession();
+    if (!mounted) return;
+    setState(() {
+      _isConnecting = false;
+      _mySessionId = _service.sessionId;
+    });
     if (ok) {
-      _snack('Session created: $id');
+      _sessionController.text = _mySessionId ?? '';
+      _snack('Session created: ${_mySessionId}');
     } else {
-      _snack('Failed to create session');
+      _snack('Failed to create session. Check your connection.');
     }
   }
 
@@ -52,23 +55,27 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
       return;
     }
     setState(() => _isConnecting = true);
-    final ok = await _service.join(sessionId: id, userName: _myName);
-    if (mounted) setState(() => _isConnecting = false);
+    final ok = await _service.joinSession(id);
+    if (!mounted) return;
+    setState(() {
+      _isConnecting = false;
+      _mySessionId = ok ? _service.sessionId : null;
+    });
     if (ok) {
       _snack('Joined session $id');
     } else {
-      _snack('Could not join');
+      _snack('Session not found');
     }
   }
 
   Future<void> _leave() async {
     await _service.leave();
-    if (mounted) {
-      setState(() {
-        _userCount = 0;
-        _sessionController.clear();
-      });
-    }
+    if (!mounted) return;
+    setState(() {
+      _users = {};
+      _mySessionId = null;
+      _sessionController.clear();
+    });
   }
 
   void _snack(String msg) {
@@ -82,14 +89,14 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
 
   @override
   void dispose() {
-    _service.dispose();
     _sessionController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final connected = _service.isConnected;
+    final connected = _mySessionId != null;
+    final myUid = AuthService().currentUser?.uid;
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A1A),
       appBar: AppBar(
@@ -137,7 +144,7 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
                   Expanded(
                     child: Text(
                       connected
-                          ? 'Connected as $_myName · $_userCount collaborator${_userCount == 1 ? '' : 's'}'
+                          ? 'Connected · ${_users.length} collaborator${_users.length == 1 ? '' : 's'}'
                           : 'Not connected',
                       style: TextStyle(
                         fontSize: 12.5,
@@ -178,7 +185,7 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
                         size: 20, color: Color(0xFF4A9EFF)),
                     onPressed: () {
                       Clipboard.setData(
-                          ClipboardData(text: _service.sessionId ?? ''));
+                          ClipboardData(text: _mySessionId ?? ''));
                       _snack('Code copied');
                     },
                   ),
@@ -243,43 +250,62 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
                       fontWeight: FontWeight.w600,
                       color: Color(0xFF7A7A7A))),
               const SizedBox(height: 10),
-              ..._service.users.values.map((u) => Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 9),
-                    margin: const EdgeInsets.only(bottom: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF252525),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 26,
-                          height: 26,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _userColor(u.colorIndex),
-                          ),
-                          child: Center(
-                            child: Text(
-                              u.name.isNotEmpty
-                                  ? u.name[0].toUpperCase()
-                                  : '?',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
+              ..._users.values.map((u) {
+                final isMe = u.id == myUid;
+                return Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 9),
+                  margin: const EdgeInsets.only(bottom: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF252525),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _userColor(u.colorIndex),
+                        ),
+                        child: Center(
+                          child: Text(
+                            u.name.isNotEmpty
+                                ? u.name[0].toUpperCase()
+                                : '?',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
                             ),
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Text(u.name,
-                            style: const TextStyle(
-                                fontSize: 13, color: Color(0xFFCCCCCC))),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(u.name,
+                          style: const TextStyle(
+                              fontSize: 13, color: Color(0xFFCCCCCC))),
+                      if (isMe) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF4A9EFF).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text('You',
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  color: Color(0xFF4A9EFF),
+                                  fontWeight: FontWeight.w600)),
+                        ),
                       ],
-                    ),
-                  )),
+                    ],
+                  ),
+                );
+              }),
             ],
           ],
         ),

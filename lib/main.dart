@@ -12,6 +12,7 @@ import 'package:flutter_highlight/themes/github.dart';
 import 'package:flutter_highlight/themes/monokai.dart';
 import 'package:flutter_highlight/themes/vs2015.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'auth_service.dart';
 import 'auth_screen.dart';
 import 'settings_screen.dart';
@@ -22,19 +23,13 @@ import 'collaboration_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   await AuthService().init();
   runApp(const PyIDEApp());
 }
 
-class PyIDEApp extends StatefulWidget {
+class PyIDEApp extends StatelessWidget {
   const PyIDEApp({super.key});
-
-  @override
-  State<PyIDEApp> createState() => _PyIDEAppState();
-}
-
-class _PyIDEAppState extends State<PyIDEApp> {
-  bool _signedIn = AuthService().isSignedIn;
 
   @override
   Widget build(BuildContext context) {
@@ -51,11 +46,7 @@ class _PyIDEAppState extends State<PyIDEApp> {
           onSurface: Color(0xFFCCCCCC),
         ),
       ),
-      home: _signedIn
-          ? const MainScaffold()
-          : AuthScreen(
-              onSignedIn: () => setState(() => _signedIn = true),
-            ),
+      home: const MainScaffold(),
     );
   }
 }
@@ -117,6 +108,8 @@ class _MainScaffoldState extends State<MainScaffold>
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final _collab = CollaborationService();
 
+  bool _signInPromptShownThisSession = false;
+
   static const Map<String, Map<String, TextStyle>> _themes = {
     'atom-one-dark': atomOneDarkTheme,
     'atom-one-light': atomOneLightTheme,
@@ -157,12 +150,19 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     _loadPrefs();
     _loadTabs();
     _setupPython();
-    _collab.messages.listen((msg) {
-      if (msg.type == 'code' && _collab.isConnected) {
+    _collab.codeStream.listen((code) {
+      if (_collab.isConnected) {
         _isApplyingRemote = true;
-        _codeController.text = msg.content ?? '';
+        final sel = _codeController.selection;
+        _codeController.text = code;
+        if (sel.isValid && sel.baseOffset <= code.length) {
+          _codeController.selection = sel;
+        }
         _isApplyingRemote = false;
       }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future.delayed(const Duration(seconds: 8), _maybeSignInPrompt);
     });
   }
 
@@ -173,6 +173,63 @@ print(f"2 + 3 = {calc.add(2, 3)}")
         state == AppLifecycleState.inactive) {
       _saveTabs();
     }
+  }
+
+  Future<void> _maybeSignInPrompt() async {
+    if (!mounted) return;
+    if (AuthService().isSignedIn) return;
+    if (_signInPromptShownThisSession) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final last = prefs.getInt('signin_prompt_last') ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - last < const Duration(days: 3).inMilliseconds) return;
+    await prefs.setInt('signin_prompt_last', now);
+    _signInPromptShownThisSession = true;
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Sign in to unlock real-time collaboration →',
+          style: TextStyle(fontSize: 13),
+        ),
+        duration: const Duration(seconds: 6),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF252525),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        action: SnackBarAction(
+          label: 'Sign In',
+          textColor: const Color(0xFF4A9EFF),
+          onPressed: _openSignIn,
+        ),
+      ),
+    );
+  }
+
+  void _openSignIn() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AuthScreen(
+          allowSkip: true,
+          onSignedIn: () {
+            Navigator.pop(context);
+            setState(() {});
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Welcome, ${AuthService().displayName}!',
+                    style: const TextStyle(fontSize: 13)),
+                behavior: SnackBarBehavior.floating,
+                backgroundColor: const Color(0xFF252525),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _loadPrefs() async {
@@ -267,7 +324,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
       final wrapper = File('$_nativeLibDir/libpython3-exec.so');
       if (!wrapper.existsSync()) throw Exception('Python wrapper not found');
 
-      final marker = File('${root.path}/.extracted_v7');
+      final marker = File('${root.path}/.extracted_v8');
       if (!marker.existsSync()) {
         if (root.existsSync()) root.deleteSync(recursive: true);
         await root.create(recursive: true);
@@ -276,6 +333,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
         final tmpTar = File('${docsDir.path}/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
+        // Extract + create libz.so.1 symlinks for pip
         final script = '''
 cd "${root.path}"
 mkdir -p _tmp
@@ -284,7 +342,28 @@ mkdir -p lib
 if [ -d "_tmp/stdlib/python3.14" ]; then
   mv "_tmp/stdlib/python3.14" "lib/python3.14"
 fi
+if [ -d "_tmp/lib" ]; then
+  cp _tmp/lib/*.so* lib/ 2>/dev/null || true
+fi
 rm -rf _tmp
+
+# Copy native libs into writable python_runtime/lib
+mkdir -p lib
+cp "${_nativeLibDir}"/*.so lib/ 2>/dev/null || true
+
+# Create version symlinks pip and stdlib modules need
+cd lib
+[ -f libz.so ] && ln -sf libz.so libz.so.1
+[ -f libssl.so ] && ln -sf libssl.so libssl.so.3
+[ -f libcrypto.so ] && ln -sf libcrypto.so libcrypto.so.3
+[ -f libsqlite3.so ] && ln -sf libsqlite3.so libsqlite3.so.0
+[ -f libffi.so ] && ln -sf libffi.so libffi.so.8
+[ -f libbz2.so ] && ln -sf libbz2.so libbz2.so.1.0
+[ -f liblzma.so ] && ln -sf liblzma.so liblzma.so.5
+[ -f libexpat.so ] && ln -sf libexpat.so libexpat.so.1
+[ -f libreadline.so ] && ln -sf libreadline.so libreadline.so.8
+[ -f libncursesw.so ] && ln -sf libncursesw.so libncursesw.so.6
+[ -f libtinfo.so ] && ln -sf libtinfo.so libtinfo.so.6
 ''';
         await Process.run('/system/bin/sh', ['-c', script]);
         await tmpTar.delete();
@@ -293,13 +372,21 @@ rm -rf _tmp
             .existsSync()) {
           throw Exception('encodings missing');
         }
-        await marker.writeAsString('v7');
+        await marker.writeAsString('v8');
       }
 
       setState(() => _isSetupComplete = true);
     } catch (e) {
       _append('Setup failed: $e');
     }
+  }
+
+  Map<String, String> _runEnv() {
+    return {
+      'PYTHONHOME': _pythonRoot ?? '',
+      'PYTHONPATH': '${_pythonRoot}/lib/python3.14',
+      'LD_LIBRARY_PATH': '${_pythonRoot}/lib:${_nativeLibDir ?? ''}',
+    };
   }
 
   Future<void> _runCode() async {
@@ -320,13 +407,14 @@ rm -rf _tmp
     await scriptFile.writeAsString(_codeController.text);
 
     try {
-      final cmd = '''
-export PYTHONHOME="$_pythonRoot"
-export PYTHONPATH="$_pythonRoot/lib/python3.14"
-export LD_LIBRARY_PATH="$_nativeLibDir"
-"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"
-''';
-      final result = await Process.run('/bin/sh', ['-c', cmd]);
+      final cmd =
+          '"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"';
+      final result = await Process.run(
+        '/system/bin/sh',
+        ['-c', cmd],
+        environment: _runEnv(),
+        includeParentEnvironment: true,
+      );
       if ((result.stdout as String).isNotEmpty) {
         _append(result.stdout as String);
       }
@@ -468,6 +556,10 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
         _closeTab(_activeTab);
         break;
       case 'collab':
+        if (!AuthService().isSignedIn) {
+          _showSignInRequiredDialog();
+          return;
+        }
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -514,24 +606,60 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           MaterialPageRoute(builder: (_) => const AboutScreen()),
         );
         break;
+      case 'signin':
+        _openSignIn();
+        break;
       case 'signout':
         await AuthService().signOut();
-        if (mounted) {
-          Navigator.of(context).pushAndRemoveUntil(
-            MaterialPageRoute(
-              builder: (_) => AuthScreen(
-                onSignedIn: () {},
-              ),
-            ),
-            (route) => false,
-          );
-        }
+        if (mounted) setState(() {});
         break;
       case 'exit':
         await _saveTabs();
         SystemNavigator.pop();
         break;
     }
+  }
+
+  void _showSignInRequiredDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF252525),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.group_add_outlined,
+                size: 20, color: Color(0xFF4A9EFF)),
+            SizedBox(width: 10),
+            Text('Sign in to collaborate',
+                style: TextStyle(fontSize: 15, color: Color(0xFFCCCCCC))),
+          ],
+        ),
+        content: const Text(
+          'Create a free account to collaborate in real time with anyone, on any device. Your code stays private — only people with your session code can join.',
+          style: TextStyle(fontSize: 13, height: 1.5, color: Color(0xFFAAAAAA)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Later',
+                style: TextStyle(color: Color(0xFF888888))),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _openSignIn();
+            },
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF4A9EFF),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Sign In'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -543,7 +671,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _editorFocus.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
-    _collab.dispose();
     super.dispose();
   }
 
@@ -572,8 +699,18 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             if (i >= 0) _switchTab(i);
             Navigator.pop(context);
           },
-          userName: user?.username ?? 'Guest',
+          userName: AuthService().displayName,
           userEmail: user?.email ?? '',
+          isSignedIn: user != null,
+          onSignInTap: () {
+            Navigator.pop(context);
+            _openSignIn();
+          },
+          onSignOutTap: () async {
+            Navigator.pop(context);
+            await AuthService().signOut();
+            if (mounted) setState(() {});
+          },
         ),
       ),
       appBar: _appBar(),
@@ -679,21 +816,27 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             side: const BorderSide(color: Color(0xFF2E2E2E), width: 1),
           ),
           onSelected: _handleMenu,
-          itemBuilder: (_) => [
-            _mi('new', Icons.note_add_outlined, 'New file'),
-            _mi('files', Icons.folder_open_outlined, 'Files'),
-            _mi('save', Icons.save_outlined, 'Save'),
-            _mi('close', Icons.close, 'Close file'),
-            _divider(),
-            _mi('collab', Icons.group_add_outlined, 'Collaborate'),
-            _mi('terminal', Icons.terminal_outlined, 'Terminal'),
-            _divider(),
-            _mi('settings', Icons.settings_outlined, 'Settings'),
-            _mi('about', Icons.info_outline, 'About'),
-            _mi('signout', Icons.person_remove_outlined, 'Sign out'),
-            _divider(),
-            _mi('exit', Icons.logout_outlined, 'Exit'),
-          ],
+          itemBuilder: (_) {
+            final signed = AuthService().isSignedIn;
+            return [
+              _mi('new', Icons.note_add_outlined, 'New file'),
+              _mi('files', Icons.folder_open_outlined, 'Files'),
+              _mi('save', Icons.save_outlined, 'Save'),
+              _mi('close', Icons.close, 'Close file'),
+              _divider(),
+              _mi('collab', Icons.group_add_outlined, 'Collaborate'),
+              _mi('terminal', Icons.terminal_outlined, 'Terminal'),
+              _divider(),
+              _mi('settings', Icons.settings_outlined, 'Settings'),
+              _mi('about', Icons.info_outline, 'About'),
+              _divider(),
+              if (!signed)
+                _mi('signin', Icons.login, 'Sign in')
+              else
+                _mi('signout', Icons.person_remove_outlined, 'Sign out'),
+              _mi('exit', Icons.logout_outlined, 'Exit'),
+            ];
+          },
         ),
         const SizedBox(width: 4),
       ],
@@ -796,7 +939,7 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             height: 1.5,
           ),
           gutterStyle: GutterStyle(
-            width: _showLineNumbers ? 50 : 0,
+            width: _showLineNumbers ? 56 : 0,
             showLineNumbers: _showLineNumbers,
             showErrors: false,
             showFoldingHandles: false,
@@ -1083,6 +1226,9 @@ class SidebarContent extends StatelessWidget {
   final ValueChanged<String> onFileTap;
   final String userName;
   final String userEmail;
+  final bool isSignedIn;
+  final VoidCallback onSignInTap;
+  final VoidCallback onSignOutTap;
 
   const SidebarContent({
     super.key,
@@ -1092,6 +1238,9 @@ class SidebarContent extends StatelessWidget {
     required this.onFileTap,
     required this.userName,
     required this.userEmail,
+    required this.isSignedIn,
+    required this.onSignInTap,
+    required this.onSignOutTap,
   });
 
   @override
@@ -1135,9 +1284,7 @@ class SidebarContent extends StatelessWidget {
             margin: const EdgeInsets.symmetric(horizontal: 8),
             padding: const EdgeInsets.symmetric(vertical: 10),
             decoration: BoxDecoration(
-              color: active
-                  ? const Color(0xFF252525)
-                  : Colors.transparent,
+              color: active ? const Color(0xFF252525) : Colors.transparent,
               borderRadius: BorderRadius.circular(8),
             ),
             child: Icon(
@@ -1286,70 +1433,144 @@ class SidebarContent extends StatelessWidget {
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
-            child: Column(
-              children: [
-                Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)],
-                    ),
-                  ),
-                  child: Center(
-                    child: Text(
-                      userName.isNotEmpty ? userName[0].toUpperCase() : '?',
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  userName,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFFCCCCCC),
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  userEmail,
-                  style: const TextStyle(
-                    fontSize: 11.5,
-                    color: Color(0xFF7A7A7A),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF202020),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Signed in',
-                          style: TextStyle(
-                              fontSize: 11, color: Color(0xFF7A7A7A))),
-                      SizedBox(height: 4),
-                      Text('Your projects are saved on this device.',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFFAAAAAA),
-                              height: 1.4)),
-                    ],
-                  ),
-                ),
-              ],
+            child: isSignedIn ? _signedInProfile(context) : _signedOutProfile(context),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _signedInProfile(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+              colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)],
             ),
+          ),
+          child: Center(
+            child: Text(
+              userName.isNotEmpty ? userName[0].toUpperCase() : '?',
+              style: const TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          userName,
+          style: const TextStyle(
+            fontSize: 14,
+            color: Color(0xFFCCCCCC),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          userEmail,
+          style: const TextStyle(
+            fontSize: 11.5,
+            color: Color(0xFF7A7A7A),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFF202020),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Signed in',
+                  style:
+                      TextStyle(fontSize: 11, color: Color(0xFF7A7A7A))),
+              SizedBox(height: 4),
+              Text('Collaborate with anyone, anywhere.',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFFAAAAAA),
+                      height: 1.4)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFFFF6B6B),
+              padding: const EdgeInsets.symmetric(vertical: 11),
+              side: const BorderSide(color: Color(0xFF333333)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: onSignOutTap,
+            child: const Text('Sign out',
+                style: TextStyle(fontSize: 12.5)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _signedOutProfile(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: const Color(0xFF252525),
+            border:
+                Border.all(color: const Color(0xFF303030), width: 1.5),
+          ),
+          child: const Icon(Icons.person_outline,
+              size: 28, color: Color(0xFF6A6A6A)),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Not signed in',
+          style: TextStyle(
+            fontSize: 13,
+            color: Color(0xFFCCCCCC),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Sign in to collaborate with others in real time.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 12,
+            color: Color(0xFF7A7A7A),
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 18),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF4A9EFF),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 11),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: onSignInTap,
+            child: const Text('Sign in',
+                style: TextStyle(fontSize: 13)),
           ),
         ),
       ],

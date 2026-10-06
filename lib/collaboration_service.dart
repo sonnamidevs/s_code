@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'auth_service.dart';
 
 class CollabUser {
   final String id;
@@ -11,59 +10,29 @@ class CollabUser {
   CollabUser({required this.id, required this.name, required this.colorIndex});
 }
 
-class CollabMessage {
-  final String type;
-  final String userId;
-  final String userName;
-  final String? content;
-  final int? cursor;
-  final int colorIndex;
-  CollabMessage({
-    required this.type,
-    required this.userId,
-    required this.userName,
-    this.content,
-    this.cursor,
-    this.colorIndex = 0,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'type': type,
-        'userId': userId,
-        'userName': userName,
-        'content': content,
-        'cursor': cursor,
-        'colorIndex': colorIndex,
-      };
-
-  factory CollabMessage.fromJson(Map<String, dynamic> json) => CollabMessage(
-        type: json['type'] as String,
-        userId: json['userId'] as String,
-        userName: json['userName'] as String,
-        content: json['content'] as String?,
-        cursor: json['cursor'] as int?,
-        colorIndex: json['colorIndex'] as int? ?? 0,
-      );
-}
-
 class CollaborationService {
-  MqttServerClient? _client;
+  static final CollaborationService _i = CollaborationService._internal();
+  factory CollaborationService() => _i;
+  CollaborationService._internal();
+
+  final _db = FirebaseFirestore.instance;
+
   String? _sessionId;
-  String? _userId;
-  String? _userName;
+  StreamSubscription? _sessionSub;
+  StreamSubscription? _usersSub;
+  Timer? _presenceTimer;
 
-  final _messages = StreamController<CollabMessage>.broadcast();
-  Stream<CollabMessage> get messages => _messages.stream;
+  final _codeStream = StreamController<String>.broadcast();
+  Stream<String> get codeStream => _codeStream.stream;
 
-  final _status = StreamController<String>.broadcast();
-  Stream<String> get status => _status.stream;
+  final _usersStream = StreamController<Map<String, CollabUser>>.broadcast();
+  Stream<Map<String, CollabUser>> get usersStream => _usersStream.stream;
 
-  final Map<String, CollabUser> _users = {};
-  Map<String, CollabUser> get users => Map.unmodifiable(_users);
+  final _statusStream = StreamController<String>.broadcast();
+  Stream<String> get statusStream => _statusStream.stream;
 
-  bool get isConnected =>
-      _client?.connectionStatus?.state == MqttConnectionState.connected;
   String? get sessionId => _sessionId;
+  bool get isConnected => _sessionId != null;
 
   static String generateSessionId() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -71,98 +40,162 @@ class CollaborationService {
     return List.generate(6, (_) => chars[r.nextInt(chars.length)]).join();
   }
 
-  Future<bool> join({required String sessionId, required String userName}) async {
-    _sessionId = sessionId.toUpperCase();
-    _userName = userName;
-    _userId = DateTime.now().millisecondsSinceEpoch.toString() +
-        Random().nextInt(9999).toString();
-
-    final clientId = 'pyide_${_userId!}_${Random().nextInt(99999)}';
-    final client = MqttServerClient.withPort(
-        'broker.hivemq.com', clientId, 8884);
-    client.useWebSocket = true;
-    client.secure = true;
-    client.logging(on: false);
-    client.keepAlivePeriod = 20;
-    client.autoReconnect = true;
-    client.onDisconnected = () => _status.add('disconnected');
-    client.onConnected = () => _status.add('connected');
+  Future<bool> createSession() async {
+    final id = generateSessionId();
+    final user = AuthService().currentUser;
+    if (user == null) return false;
 
     try {
-      _status.add('connecting');
-      await client.connect();
+      final color = Random().nextInt(6);
+      await _db.collection('sessions').doc(id).set({
+        'ownerId': user.uid,
+        'ownerName': AuthService().displayName,
+        'code': '# New collaboration session\n# Start typing here...\n\n',
+        'codeVersion': 1,
+        'createdAt': FieldValue.serverTimestamp(),
+        'lastUpdate': FieldValue.serverTimestamp(),
+      });
+      await _db
+          .collection('sessions')
+          .doc(id)
+          .collection('users')
+          .doc(user.uid)
+          .set({
+        'name': AuthService().displayName,
+        'colorIndex': color,
+        'lastSeen': FieldValue.serverTimestamp(),
+      });
+      await _subscribe(id);
+      return true;
     } catch (e) {
-      _status.add('error: $e');
       return false;
     }
+  }
 
-    _client = client;
-    final topic = 'pyide/session/$_sessionId';
-    client.subscribe(topic, MqttQos.atLeastOnce);
+  Future<bool> joinSession(String id) async {
+    id = id.trim().toUpperCase();
+    if (id.length != 6) return false;
+    final user = AuthService().currentUser;
+    if (user == null) return false;
 
-    client.updates!.listen((events) {
-      for (final ev in events) {
-        final pub = ev.payload as MqttPublishMessage;
-        final payload =
-            MqttPublishPayload.bytesToStringAsString(pub.payload.message);
-        try {
-          final msg = CollabMessage.fromJson(
-              jsonDecode(payload) as Map<String, dynamic>);
-          if (msg.userId == _userId) continue;
-          if (msg.type == 'join') {
-            _users[msg.userId] = CollabUser(
-                id: msg.userId, name: msg.userName, colorIndex: msg.colorIndex);
-          } else if (msg.type == 'leave') {
-            _users.remove(msg.userId);
-          }
-          _messages.add(msg);
-        } catch (_) {}
+    try {
+      final doc = await _db.collection('sessions').doc(id).get();
+      if (!doc.exists) return false;
+
+      final color = Random().nextInt(6);
+      await _db
+          .collection('sessions')
+          .doc(id)
+          .collection('users')
+          .doc(user.uid)
+          .set({
+        'name': AuthService().displayName,
+        'colorIndex': color,
+        'lastSeen': FieldValue.serverTimestamp(),
+      });
+      await _subscribe(id);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  Future<void> _subscribe(String id) async {
+    _sessionId = id;
+
+    // Listen to session code
+    _sessionSub = _db.collection('sessions').doc(id).snapshots().listen(
+      (snap) {
+        final data = snap.data();
+        if (data == null) return;
+        final code = data['code'] as String? ?? '';
+        _codeStream.add(code);
+      },
+      onError: (_) => _statusStream.add('error'),
+    );
+
+    // Listen to users
+    _usersSub = _db
+        .collection('sessions')
+        .doc(id)
+        .collection('users')
+        .snapshots()
+        .listen((snap) {
+      final map = <String, CollabUser>{};
+      for (final d in snap.docs) {
+        final data = d.data();
+        map[d.id] = CollabUser(
+          id: d.id,
+          name: data['name'] as String? ?? 'User',
+          colorIndex: data['colorIndex'] as int? ?? 0,
+        );
       }
+      _usersStream.add(map);
     });
 
-    _publish(CollabMessage(
-      type: 'join',
-      userId: _userId!,
-      userName: _userName!,
-      colorIndex: Random().nextInt(6),
-    ));
+    // Heartbeat — update lastSeen every 15s
+    _presenceTimer?.cancel();
+    _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _updatePresence();
+    });
 
-    return true;
+    _statusStream.add('connected');
   }
 
-  void _publish(CollabMessage msg) {
-    if (_client == null || _sessionId == null) return;
-    final topic = 'pyide/session/$_sessionId';
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(jsonEncode(msg.toJson()));
-    _client!.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!);
+  Future<void> _updatePresence() async {
+    final id = _sessionId;
+    final user = AuthService().currentUser;
+    if (id == null || user == null) return;
+    try {
+      await _db
+          .collection('sessions')
+          .doc(id)
+          .collection('users')
+          .doc(user.uid)
+          .update({'lastSeen': FieldValue.serverTimestamp()});
+    } catch (_) {}
   }
 
-  void sendCode(String content) {
-    if (_userId == null) return;
-    _publish(CollabMessage(
-      type: 'code',
-      userId: _userId!,
-      userName: _userName!,
-      content: content,
-    ));
+  /// Push the current editor content to Firestore.
+  Future<void> sendCode(String content) async {
+    final id = _sessionId;
+    if (id == null) return;
+    try {
+      await _db.collection('sessions').doc(id).update({
+        'code': content,
+        'lastUpdate': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
   }
 
   Future<void> leave() async {
-    if (_userId != null) {
-      _publish(CollabMessage(
-          type: 'leave', userId: _userId!, userName: _userName!));
+    final id = _sessionId;
+    final user = AuthService().currentUser;
+    _presenceTimer?.cancel();
+    await _sessionSub?.cancel();
+    await _usersSub?.cancel();
+    _sessionSub = null;
+    _usersSub = null;
+    if (id != null && user != null) {
+      try {
+        await _db
+            .collection('sessions')
+            .doc(id)
+            .collection('users')
+            .doc(user.uid)
+            .delete();
+      } catch (_) {}
     }
-    await Future.delayed(const Duration(milliseconds: 200));
-    _client?.disconnect();
-    _client = null;
     _sessionId = null;
-    _users.clear();
+    _statusStream.add('disconnected');
   }
 
   void dispose() {
-    _messages.close();
-    _status.close();
-    _client?.disconnect();
+    _presenceTimer?.cancel();
+    _sessionSub?.cancel();
+    _usersSub?.cancel();
+    _codeStream.close();
+    _usersStream.close();
+    _statusStream.close();
   }
 }
