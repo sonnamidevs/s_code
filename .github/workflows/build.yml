@@ -26,7 +26,9 @@ jobs:
       # ==================== KEYSTORE SETUP ====================
       - name: Decode Keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+          echo "Keystore size:"
+          wc -c android/app/upload-keystore.jks
 
       - name: Create key.properties
         run: |
@@ -36,13 +38,31 @@ jobs:
           keyAlias=${{ secrets.KEY_ALIAS }}
           storeFile=upload-keystore.jks
           EOF
+          echo "key.properties created:"
+          cat android/key.properties
       # ========================================================
 
       # ==================== FIREBASE SETUP ====================
       - name: Decode google-services.json
         run: |
-          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > android/app/google-services.json
-          ls -lh android/app/google-services.json
+          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 -d > android/app/google-services.json
+          
+          echo "File size:"
+          wc -c android/app/google-services.json
+          
+          echo "First 200 chars:"
+          head -c 200 android/app/google-services.json
+          echo ""
+          echo ""
+          
+          if ! python3 -c "import json; json.load(open('android/app/google-services.json'))" 2>/dev/null; then
+            echo "ERROR: google-services.json is NOT valid JSON!"
+            echo "Full contents:"
+            cat android/app/google-services.json
+            exit 1
+          fi
+          
+          echo "✓ google-services.json is valid JSON"
       # ========================================================
 
       - name: Get dependencies
