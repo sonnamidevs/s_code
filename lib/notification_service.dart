@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -7,6 +9,7 @@ class AppNotification {
   final IconData icon;
   final DateTime timestamp;
   final String type;
+  
   AppNotification({
     required this.title,
     required this.body,
@@ -89,7 +92,3 @@ class NotificationService {
 
   List<AppNotification> get items => List.unmodifiable(_items);
 }
-
-// Needed for the class above
-import 'dart:convert';
-import 'dart:async';
