@@ -1,4 +1,4 @@
-name: Build S Code APK
+name: Build PyIDE APK
 
 on:
   push:
@@ -8,8 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +23,7 @@ jobs:
           channel: 'stable'
           cache: true
 
+      # ==================== KEYSTORE SETUP ====================
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
@@ -37,6 +36,14 @@ jobs:
           keyAlias=${{ secrets.KEY_ALIAS }}
           storeFile=upload-keystore.jks
           EOF
+      # ========================================================
+
+      # ==================== FIREBASE SETUP ====================
+      - name: Decode google-services.json
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > android/app/google-services.json
+          ls -lh android/app/google-services.json
+      # ========================================================
 
       - name: Get dependencies
         run: flutter pub get
@@ -45,28 +52,10 @@ jobs:
         run: flutter build apk --release
 
       - name: Rename APK
-        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/SCode.apk
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/PyIDE.apk
 
-      - name: Read version
-        id: version
-        run: |
-          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Upload artifact (backup)
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SCode
-          path: build/app/outputs/flutter-apk/SCode.apk
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          name: S Code v${{ steps.version.outputs.VERSION }}
-          body: |
-            Automated build of S Code v${{ steps.version.outputs.VERSION }}.
-            Download SCode.apk below and install it on your Android phone.
-          files: build/app/outputs/flutter-apk/SCode.apk
-          draft: false
-          prerelease: false
+          name: PyIDE
+          path: build/app/outputs/flutter-apk/PyIDE.apk
