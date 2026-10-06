@@ -10,12 +10,12 @@ class AboutScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1A1A1A),
         elevation: 0,
-        toolbarHeight: 42,
+        toolbarHeight: 44,
         iconTheme:
             const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
         title: const Text('About',
             style: TextStyle(
-                fontSize: 12.5,
+                fontSize: 13.5,
                 color: Color(0xFFCCCCCC),
                 fontWeight: FontWeight.w400)),
       ),
@@ -48,7 +48,6 @@ class AboutScreen extends StatelessWidget {
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
                     color: Colors.white,
-                    letterSpacing: 0.5,
                   ),
                 ),
               ),
@@ -57,17 +56,16 @@ class AboutScreen extends StatelessWidget {
             const Text(
               'Bismark Nana Konadu',
               style: TextStyle(
-                fontSize: 15,
+                fontSize: 16,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFFCCCCCC),
-                letterSpacing: 0.2,
               ),
             ),
             const SizedBox(height: 4),
             const Text(
               '@Sonnami Devs',
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 12.5,
                 color: Color(0xFF4A9EFF),
                 fontWeight: FontWeight.w500,
               ),
@@ -85,7 +83,7 @@ class AboutScreen extends StatelessWidget {
                   _R('Studio', 'Sonnami Develops'),
                   _R('Country', 'Ghana 🇬🇭'),
                   _R('App', 'PyIDE'),
-                  _R('Version', '0.3.0'),
+                  _R('Version', '0.4.0'),
                   _R('Runtime', 'Python 3.14'),
                 ],
               ),
@@ -95,7 +93,7 @@ class AboutScreen extends StatelessWidget {
               'A mobile Python IDE built from scratch.\nRuns natively on Android.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 11.5,
+                fontSize: 12,
                 height: 1.6,
                 color: Color(0xFF888888),
               ),
@@ -106,9 +104,8 @@ class AboutScreen extends StatelessWidget {
             const Text(
               '© 2026 Sonnami Develops',
               style: TextStyle(
-                fontSize: 10.5,
+                fontSize: 11,
                 color: Color(0xFF6A6A6A),
-                letterSpacing: 0.3,
               ),
             ),
           ],
@@ -131,11 +128,11 @@ class _R extends StatelessWidget {
         children: [
           Text(label,
               style: const TextStyle(
-                  fontSize: 12, color: Color(0xFF888888))),
+                  fontSize: 12.5, color: Color(0xFF888888))),
           const Spacer(),
           Text(value,
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 12.5,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFFCCCCCC),
               )),

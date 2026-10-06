@@ -1,64 +1,66 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 class TerminalScreen extends StatefulWidget {
   final String? pythonRoot;
   final String? nativeLibDir;
 
-  const TerminalScreen({
-    super.key,
-    this.pythonRoot,
-    this.nativeLibDir,
-  });
+  const TerminalScreen({super.key, this.pythonRoot, this.nativeLibDir});
 
   @override
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
-  final TextEditingController _inputController = TextEditingController();
-  final TextEditingController _historyController = TextEditingController();
-  final ScrollController _scroll = ScrollController();
-  final FocusNode _inputFocus = FocusNode();
+  final _inputCtrl = TextEditingController();
+  final _historyCtrl = TextEditingController();
+  final _scroll = ScrollController();
+  final _inputFocus = FocusNode();
 
   late String _cwd;
   bool _isRunning = false;
   bool _ctrlActive = false;
+  bool _altActive = false;
+
+  final List<String> _commandHistory = [];
+  int _historyIndex = -1;
 
   @override
   void initState() {
     super.initState();
     _cwd = widget.pythonRoot ?? '/';
-    _write('PyIDE Terminal');
-    _write('Type a command and press Enter.');
-    _write('');
+    _print('Welcome to PyIDE Terminal');
+    _print('');
+    _print('Type "help" for available commands.');
+    _print('Type "pip install <package>" to install Python packages.');
+    _print('');
   }
 
-  void _write(String text) {
-    _historyController.text += '$text\n';
+  void _print(String text) {
+    _historyCtrl.text += '$text\n';
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
-        _scroll.animateTo(
-          _scroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
-        );
+        _scroll.animateTo(_scroll.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut);
       }
     });
   }
 
-  Map<String, String> _buildEnv() {
-    const systemPath =
-        '/system/bin:/system/xbin:/vendor/bin:/product/bin';
+  String get _prompt {
+    final path = _cwd.replaceFirst(widget.pythonRoot ?? '~', '~');
+    return '$path \$';
+  }
 
+  Map<String, String> _env() {
+    const systemPath = '/system/bin:/system/xbin:/vendor/bin:/product/bin';
     final env = <String, String>{
       'PATH': systemPath,
-      'HOME': '/',
+      'HOME': widget.pythonRoot ?? '/',
       'TERM': 'xterm-256color',
       'LANG': 'en_US.UTF-8',
+      'PS1': _prompt,
     };
-
     if (widget.pythonRoot != null && widget.nativeLibDir != null) {
       env['PYTHONHOME'] = widget.pythonRoot!;
       env['PYTHONPATH'] = '${widget.pythonRoot}/lib/python3.14';
@@ -66,23 +68,21 @@ class _TerminalScreenState extends State<TerminalScreen> {
       env['PATH'] =
           '${widget.pythonRoot}/bin:${widget.nativeLibDir}:$systemPath';
     }
-
     return env;
   }
 
   Future<void> _runCommand(String raw) async {
     final cmd = raw.trim();
-    if (cmd.isEmpty) {
-      _write('\$');
-      return;
-    }
+    if (cmd.isEmpty) return;
 
+    _commandHistory.insert(0, cmd);
+    _historyIndex = -1;
+
+    _print('${_prompt} $cmd');
     setState(() => _isRunning = true);
-    _write('\$ $cmd');
 
     if (cmd == 'cd' || cmd.startsWith('cd ')) {
-      final parts = cmd.split(' ');
-      final target = parts.length > 1 ? parts.sublist(1).join(' ') : '/';
+      final target = cmd.length > 3 ? cmd.substring(3).trim() : '/';
       final newPath = target.startsWith('/') ? target : '$_cwd/$target';
       final dir = Directory(newPath);
       if (await dir.exists()) {
@@ -92,7 +92,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
           _cwd = newPath;
         }
       } else {
-        _write('cd: no such directory: $target');
+        _print('cd: no such directory: $target');
       }
       setState(() => _isRunning = false);
       return;
@@ -100,47 +100,92 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
     if (cmd == 'clear') {
       setState(() {
-        _historyController.clear();
+        _historyCtrl.clear();
         _isRunning = false;
       });
       return;
     }
 
+    if (cmd == 'help') {
+      _print('Available commands:');
+      _print('  ls, cd, pwd, cat, mkdir, rm, echo');
+      _print('  pip install <package>');
+      _print('  python <file.py>');
+      _print('  clear');
+      setState(() => _isRunning = false);
+      return;
+    }
+
+    String actualCmd = cmd;
+    if (cmd == 'pip' || cmd.startsWith('pip ')) {
+      final py = '${widget.pythonRoot}/lib/python3.14';
+      final pythonBin = widget.nativeLibDir != null
+          ? '${widget.nativeLibDir}/libpython3-exec.so'
+          : 'python3';
+      final args = cmd.length > 3 ? cmd.substring(3).trim() : '';
+      final envStr = widget.nativeLibDir != null
+          ? 'PYTHONHOME="${widget.pythonRoot}" PYTHONPATH="$py" LD_LIBRARY_PATH="${widget.nativeLibDir}" '
+          : '';
+      actualCmd = '$envStr"$pythonBin" -m pip $args';
+    }
+
     try {
       final result = await Process.run(
         '/system/bin/sh',
-        ['-c', cmd],
+        ['-c', actualCmd],
         workingDirectory: _cwd,
-        environment: _buildEnv(),
+        environment: _env(),
         includeParentEnvironment: true,
       );
 
       final out = (result.stdout as String).trimRight();
       final err = (result.stderr as String).trimRight();
 
-      if (out.isNotEmpty) _write(out);
-      if (err.isNotEmpty) _write(err);
+      if (out.isNotEmpty) _print(out);
+      if (err.isNotEmpty) {
+        if (!err.contains('Broken pipe')) _print(err);
+      }
       if (out.isEmpty && err.isEmpty && result.exitCode != 0) {
-        _write('[exit ${result.exitCode}]');
+        _print('[exit ${result.exitCode}]');
       }
     } catch (e) {
-      _write('Error: $e');
+      _print('Error: $e');
     } finally {
       setState(() => _isRunning = false);
     }
   }
 
-  void _insertKey(String text) {
-    final sel = _inputController.selection;
-    final value = _inputController.text;
+  void _historyUp() {
+    if (_commandHistory.isEmpty) return;
+    if (_historyIndex < _commandHistory.length - 1) _historyIndex++;
+    _inputCtrl.text = _commandHistory[_historyIndex];
+    _inputCtrl.selection =
+        TextSelection.collapsed(offset: _inputCtrl.text.length);
+  }
+
+  void _historyDown() {
+    if (_historyIndex > 0) {
+      _historyIndex--;
+      _inputCtrl.text = _commandHistory[_historyIndex];
+    } else {
+      _historyIndex = -1;
+      _inputCtrl.clear();
+    }
+    _inputCtrl.selection =
+        TextSelection.collapsed(offset: _inputCtrl.text.length);
+  }
+
+  void _insert(String text) {
+    final sel = _inputCtrl.selection;
+    final value = _inputCtrl.text;
     if (!sel.isValid) {
-      _inputController.text = value + text;
-      _inputController.selection =
-          TextSelection.collapsed(offset: _inputController.text.length);
+      _inputCtrl.text = value + text;
+      _inputCtrl.selection =
+          TextSelection.collapsed(offset: _inputCtrl.text.length);
       return;
     }
     final newText = value.replaceRange(sel.start, sel.end, text);
-    _inputController.value = TextEditingValue(
+    _inputCtrl.value = TextEditingValue(
       text: newText,
       selection: TextSelection.collapsed(offset: sel.start + text.length),
     );
@@ -148,8 +193,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   void dispose() {
-    _inputController.dispose();
-    _historyController.dispose();
+    _inputCtrl.dispose();
+    _historyCtrl.dispose();
     _scroll.dispose();
     _inputFocus.dispose();
     super.dispose();
@@ -158,13 +203,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF000000),
+      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0E0E0E),
+        backgroundColor: const Color(0xFF0D0D0D),
         elevation: 0,
         toolbarHeight: 44,
-        iconTheme:
-            const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
+        iconTheme: const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
         title: const Text('Terminal',
             style: TextStyle(
                 fontSize: 13.5,
@@ -173,119 +217,65 @@ class _TerminalScreenState extends State<TerminalScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.delete_outline, size: 18),
-            onPressed: () => setState(() => _historyController.clear()),
+            onPressed: () => setState(() => _historyCtrl.clear()),
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: GestureDetector(
-              onTap: () => _inputFocus.requestFocus(),
-              behavior: HitTestBehavior.opaque,
-              child: SingleChildScrollView(
-                controller: _scroll,
-                padding: const EdgeInsets.all(10),
-                child: Text(
-                  _historyController.text,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12.5,
-                    height: 1.45,
-                    color: Color(0xFFCCCCCC),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _inputFocus.requestFocus(),
+                behavior: HitTestBehavior.opaque,
+                child: SingleChildScrollView(
+                  controller: _scroll,
+                  padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
+                  child: SelectableText(
+                    _historyCtrl.text,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12.5,
+                      height: 1.45,
+                      color: Color(0xFFCCCCCC),
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          Container(
-            height: 40,
-            color: const Color(0xFF0E0E0E),
-            child: Row(
-              children: [
-                _key('ESC', () => _insertKey('\u001b')),
-                _key('TAB', () => _insertKey('    ')),
-                _modKey('CTRL', _ctrlActive, () {
-                  setState(() => _ctrlActive = !_ctrlActive);
-                }),
-                _modKey('ALT', false, () {}),
-                _key('-', () => _insertKey('-')),
-                _key('/', () => _insertKey('/')),
-                _key('|', () => _insertKey('|')),
-                _key('~', () => _insertKey('~')),
-                _key('<', () => _insertKey('<')),
-                _key('>', () => _insertKey('>')),
-              ],
-            ),
-          ),
-          Container(
-            color: const Color(0xFF0E0E0E),
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            child: Row(
-              children: [
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 6),
-                  child: Text(
-                    '\$',
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF3FB950),
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _inputController,
-                    focusNode: _inputFocus,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 13,
-                      color: Color(0xFFCCCCCC),
-                    ),
-                    cursorColor: const Color(0xFF3FB950),
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(vertical: 10),
-                    ),
-                    onSubmitted: (v) {
-                      _inputController.clear();
-                      _runCommand(v);
-                    },
-                  ),
-                ),
-                if (_isRunning)
-                  const Padding(
-                    padding: EdgeInsets.all(6),
-                    child: SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 1.7,
-                          color: Color(0xFF3FB950)),
-                    ),
-                  )
-                else
-                  IconButton(
-                    icon: const Icon(Icons.arrow_upward,
-                        size: 18, color: Color(0xFF3FB950)),
-                    onPressed: () {
-                      final v = _inputController.text;
-                      _inputController.clear();
-                      _runCommand(v);
-                    },
-                  ),
-              ],
-            ),
-          ),
+            _keyRow(),
+            _inputRow(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _keyRow() {
+    return Container(
+      height: 38,
+      color: const Color(0xFF0A0A0A),
+      child: Row(
+        children: [
+          _k('ESC', () => _insert('\u001b')),
+          _k('TAB', () => _insert('    ')),
+          _m('CTRL', _ctrlActive,
+              () => setState(() => _ctrlActive = !_ctrlActive)),
+          _m('ALT', _altActive, () => setState(() => _altActive = !_altActive)),
+          _k('↑', _historyUp),
+          _k('↓', _historyDown),
+          _k('←', () => _insert('\u001b[D')),
+          _k('→', () => _insert('\u001b[C')),
+          _k('/', () => _insert('/')),
+          _k('-', () => _insert('-')),
+          _k('|', () => _insert('|')),
+          _k('~', () => _insert('~')),
         ],
       ),
     );
   }
 
-  Widget _key(String label, VoidCallback onTap) {
+  Widget _k(String label, VoidCallback onTap) {
     return Expanded(
       child: InkWell(
         onTap: onTap,
@@ -295,7 +285,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
             style: const TextStyle(
               fontFamily: 'monospace',
               fontSize: 11.5,
-              fontWeight: FontWeight.w500,
               color: Color(0xFFCCCCCC),
             ),
           ),
@@ -304,14 +293,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
     );
   }
 
-  Widget _modKey(String label, bool active, VoidCallback onTap) {
+  Widget _m(String label, bool active, VoidCallback onTap) {
     return Expanded(
       child: InkWell(
         onTap: onTap,
         child: Center(
           child: Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
             decoration: BoxDecoration(
               color: active
                   ? const Color(0xFF3FB950).withOpacity(0.25)
@@ -322,15 +310,80 @@ class _TerminalScreenState extends State<TerminalScreen> {
               label,
               style: TextStyle(
                 fontFamily: 'monospace',
-                fontSize: 11.5,
+                fontSize: 11,
                 fontWeight: FontWeight.w600,
-                color: active
-                    ? const Color(0xFF3FB950)
-                    : const Color(0xFFAAAAAA),
+                color:
+                    active ? const Color(0xFF3FB950) : const Color(0xFFAAAAAA),
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _inputRow() {
+    return Container(
+      color: const Color(0xFF0A0A0A),
+      padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+      child: Row(
+        children: [
+          Text(
+            _prompt,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF3FB950),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _inputCtrl,
+              focusNode: _inputFocus,
+              autocorrect: false,
+              enableSuggestions: false,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12.5,
+                color: Color(0xFFCCCCCC),
+              ),
+              cursorColor: const Color(0xFF3FB950),
+              cursorWidth: 8,
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 8),
+              ),
+              onSubmitted: (v) {
+                _inputCtrl.clear();
+                _runCommand(v);
+              },
+            ),
+          ),
+          if (_isRunning)
+            const Padding(
+              padding: EdgeInsets.all(6),
+              child: SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.6, color: Color(0xFF3FB950)),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.keyboard_return,
+                  size: 20, color: Color(0xFF3FB950)),
+              onPressed: () {
+                final v = _inputCtrl.text;
+                _inputCtrl.clear();
+                _runCommand(v);
+              },
+            ),
+        ],
       ),
     );
   }

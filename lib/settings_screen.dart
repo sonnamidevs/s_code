@@ -59,12 +59,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1A1A1A),
         elevation: 0,
-        toolbarHeight: 42,
+        toolbarHeight: 44,
         iconTheme:
             const IconThemeData(color: Color(0xFFAAAAAA), size: 18),
         title: const Text('Settings',
             style: TextStyle(
-                fontSize: 12.5,
+                fontSize: 13.5,
                 color: Color(0xFFCCCCCC),
                 fontWeight: FontWeight.w400)),
       ),
@@ -83,11 +83,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(width: 10),
                     const Text('Font size',
                         style: TextStyle(
-                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
+                            fontSize: 13, color: Color(0xFFCCCCCC))),
                     const Spacer(),
                     Text('${_size.toStringAsFixed(1)} pt',
                         style: const TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12,
                           fontWeight: FontWeight.w600,
                           color: Color(0xFF4A9EFF),
                         )),
@@ -96,8 +96,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     trackHeight: 3,
-                    thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 7),
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 7),
                   ),
                   child: Slider(
                     value: _size,
@@ -121,7 +121,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(width: 10),
                     const Text('Line numbers',
                         style: TextStyle(
-                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
+                            fontSize: 13, color: Color(0xFFCCCCCC))),
                     const Spacer(),
                     Switch(
                       value: _showLineNumbers,
@@ -176,8 +176,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const SizedBox(width: 14),
                         Text(t['name']!,
                             style: const TextStyle(
-                                fontSize: 12.5,
-                                color: Color(0xFFCCCCCC))),
+                                fontSize: 13, color: Color(0xFFCCCCCC))),
                       ],
                     ),
                   ),
@@ -201,7 +200,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(width: 10),
                     const Text('About PyIDE',
                         style: TextStyle(
-                            fontSize: 12.5, color: Color(0xFFCCCCCC))),
+                            fontSize: 13, color: Color(0xFFCCCCCC))),
                     const Spacer(),
                     const Icon(Icons.chevron_right,
                         size: 18, color: Color(0xFF6A6A6A)),
@@ -220,7 +219,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Text(
           title,
           style: const TextStyle(
-            fontSize: 9.5,
+            fontSize: 10,
             letterSpacing: 1.5,
             fontWeight: FontWeight.w600,
             color: Color(0xFF7A7A7A),

@@ -12,17 +12,29 @@ import 'package:flutter_highlight/themes/github.dart';
 import 'package:flutter_highlight/themes/monokai.dart';
 import 'package:flutter_highlight/themes/vs2015.dart';
 import 'package:file_picker/file_picker.dart';
+import 'auth_service.dart';
+import 'auth_screen.dart';
 import 'settings_screen.dart';
 import 'about_screen.dart';
 import 'terminal_screen.dart';
+import 'collaboration_service.dart';
+import 'collaboration_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AuthService().init();
   runApp(const PyIDEApp());
 }
 
-class PyIDEApp extends StatelessWidget {
+class PyIDEApp extends StatefulWidget {
   const PyIDEApp({super.key});
+
+  @override
+  State<PyIDEApp> createState() => _PyIDEAppState();
+}
+
+class _PyIDEAppState extends State<PyIDEApp> {
+  bool _signedIn = AuthService().isSignedIn;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +51,11 @@ class PyIDEApp extends StatelessWidget {
           onSurface: Color(0xFFCCCCCC),
         ),
       ),
-      home: const MainScaffold(),
+      home: _signedIn
+          ? const MainScaffold()
+          : AuthScreen(
+              onSignedIn: () => setState(() => _signedIn = true),
+            ),
     );
   }
 }
@@ -74,13 +90,13 @@ class _MainScaffoldState extends State<MainScaffold>
 
   bool _isSetupComplete = false;
   bool _isRunning = false;
-  bool _hasError = false;
   String? _nativeLibDir;
   String? _pythonRoot;
 
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
   bool _isAutoIndenting = false;
+  bool _isApplyingRemote = false;
   bool _showLineNumbers = true;
 
   final List<EditorTabData> _tabs = [];
@@ -99,6 +115,7 @@ class _MainScaffoldState extends State<MainScaffold>
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _outputScroll = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _collab = CollaborationService();
 
   static const Map<String, Map<String, TextStyle>> _themes = {
     'atom-one-dark': atomOneDarkTheme,
@@ -140,6 +157,13 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     _loadPrefs();
     _loadTabs();
     _setupPython();
+    _collab.messages.listen((msg) {
+      if (msg.type == 'code' && _collab.isConnected) {
+        _isApplyingRemote = true;
+        _codeController.text = msg.content ?? '';
+        _isApplyingRemote = false;
+      }
+    });
   }
 
   @override
@@ -161,7 +185,6 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     });
   }
 
-  // ============ TAB PERSISTENCE ============
   Future<void> _loadTabs() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('tabs_data');
@@ -195,8 +218,10 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     await prefs.setInt('active_tab', _activeTab);
   }
 
-  // ============ AUTO-INDENT ============
   void _onControllerChanged() {
+    if (_collab.isConnected && !_isApplyingRemote) {
+      _collab.sendCode(_codeController.text);
+    }
     if (_isAutoIndenting) return;
     final value = _codeController.value;
     final text = value.text;
@@ -230,7 +255,6 @@ print(f"2 + 3 = {calc.add(2, 3)}")
 
   Future<void> _setupPython() async {
     try {
-      setState(() => _hasError = false);
       _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
       if (_nativeLibDir == null || _nativeLibDir!.isEmpty) {
         throw Exception('Native dir unavailable');
@@ -274,7 +298,6 @@ rm -rf _tmp
 
       setState(() => _isSetupComplete = true);
     } catch (e) {
-      setState(() => _hasError = true);
       _append('Setup failed: $e');
     }
   }
@@ -323,11 +346,9 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _outputController.text += '$text\n';
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_outputScroll.hasClients) {
-        _outputScroll.animateTo(
-          _outputScroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
-        );
+        _outputScroll.animateTo(_outputScroll.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut);
       }
     });
   }
@@ -446,6 +467,20 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
       case 'close':
         _closeTab(_activeTab);
         break;
+      case 'collab':
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => CollaborationScreen(
+              onContentReceived: (content) {
+                _isApplyingRemote = true;
+                _codeController.text = content;
+                _isApplyingRemote = false;
+              },
+            ),
+          ),
+        );
+        break;
       case 'terminal':
         Navigator.push(
           context,
@@ -479,6 +514,19 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           MaterialPageRoute(builder: (_) => const AboutScreen()),
         );
         break;
+      case 'signout':
+        await AuthService().signOut();
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => AuthScreen(
+                onSignedIn: () {},
+              ),
+            ),
+            (route) => false,
+          );
+        }
+        break;
       case 'exit':
         await _saveTabs();
         SystemNavigator.pop();
@@ -495,12 +543,14 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
     _editorFocus.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
+    _collab.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final viewInsets = MediaQuery.of(context).viewInsets.bottom;
+    final user = AuthService().currentUser;
     return Scaffold(
       key: _scaffoldKey,
       resizeToAvoidBottomInset: false,
@@ -522,6 +572,8 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             if (i >= 0) _switchTab(i);
             Navigator.pop(context);
           },
+          userName: user?.username ?? 'Guest',
+          userEmail: user?.email ?? '',
         ),
       ),
       appBar: _appBar(),
@@ -588,7 +640,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
           fontSize: 13.5,
           fontWeight: FontWeight.w400,
           color: Color(0xFFCCCCCC),
-          letterSpacing: 0,
         ),
       ),
       actions: [
@@ -634,10 +685,12 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             _mi('save', Icons.save_outlined, 'Save'),
             _mi('close', Icons.close, 'Close file'),
             _divider(),
+            _mi('collab', Icons.group_add_outlined, 'Collaborate'),
             _mi('terminal', Icons.terminal_outlined, 'Terminal'),
             _divider(),
             _mi('settings', Icons.settings_outlined, 'Settings'),
             _mi('about', Icons.info_outline, 'About'),
+            _mi('signout', Icons.person_remove_outlined, 'Sign out'),
             _divider(),
             _mi('exit', Icons.logout_outlined, 'Exit'),
           ],
@@ -662,7 +715,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               fontSize: 13.5,
               fontWeight: FontWeight.w400,
               color: Color(0xFFCCCCCC),
-              letterSpacing: 0,
             ),
           ),
         ],
@@ -690,9 +742,8 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10),
                 decoration: BoxDecoration(
-                  color: active
-                      ? const Color(0xFF252525)
-                      : Colors.transparent,
+                  color:
+                      active ? const Color(0xFF252525) : Colors.transparent,
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Row(
@@ -711,7 +762,6 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
                         color: active
                             ? const Color(0xFFCCCCCC)
                             : const Color(0xFF7A7A7A),
-                        letterSpacing: 0,
                       ),
                     ),
                     const SizedBox(width: 6),
@@ -746,13 +796,13 @@ export LD_LIBRARY_PATH="$_nativeLibDir"
             height: 1.5,
           ),
           gutterStyle: GutterStyle(
-            width: _showLineNumbers ? 36 : 0,
+            width: _showLineNumbers ? 50 : 0,
             showLineNumbers: _showLineNumbers,
             showErrors: false,
             showFoldingHandles: false,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize - 1,
+              fontSize: _fontSize - 0.5,
               height: 1.5,
               color: const Color(0xFF5C6370),
             ),
@@ -1031,6 +1081,8 @@ class SidebarContent extends StatelessWidget {
   final ValueChanged<int> onIndexChanged;
   final List<String> files;
   final ValueChanged<String> onFileTap;
+  final String userName;
+  final String userEmail;
 
   const SidebarContent({
     super.key,
@@ -1038,6 +1090,8 @@ class SidebarContent extends StatelessWidget {
     required this.onIndexChanged,
     required this.files,
     required this.onFileTap,
+    required this.userName,
+    required this.userEmail,
   });
 
   @override
@@ -1049,14 +1103,12 @@ class SidebarContent extends StatelessWidget {
           color: const Color(0xFF141414),
           child: Column(
             children: [
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
               _strip(Icons.folder_outlined, 0, 'Files'),
               _strip(Icons.search, 1, 'Search'),
               _strip(Icons.notifications_none, 2, 'Alerts'),
               _strip(Icons.favorite_border, 3, 'Favorites'),
-              const Spacer(),
               _strip(Icons.person_outline, 4, 'Profile'),
-              const SizedBox(height: 16),
             ],
           ),
         ),
@@ -1241,78 +1293,59 @@ class SidebarContent extends StatelessWidget {
                   height: 64,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: const Color(0xFF252525),
-                    border: Border.all(
-                        color: const Color(0xFF303030), width: 1.5),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)],
+                    ),
                   ),
-                  child: const Icon(Icons.person_outline,
-                      size: 28, color: Color(0xFF6A6A6A)),
+                  child: Center(
+                    child: Text(
+                      userName.isNotEmpty ? userName[0].toUpperCase() : '?',
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  'Not signed in',
-                  style: TextStyle(
-                    fontSize: 13,
+                Text(
+                  userName,
+                  style: const TextStyle(
+                    fontSize: 14,
                     color: Color(0xFFCCCCCC),
-                    fontWeight: FontWeight.w500,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Sign in to sync files across devices.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
+                const SizedBox(height: 3),
+                Text(
+                  userEmail,
+                  style: const TextStyle(
+                    fontSize: 11.5,
                     color: Color(0xFF7A7A7A),
-                    height: 1.4,
                   ),
                 ),
-                const SizedBox(height: 18),
-                SizedBox(
+                const SizedBox(height: 20),
+                Container(
                   width: double.infinity,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF4A9EFF),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Sign-in coming soon'),
-                          duration: Duration(seconds: 2),
-                        ),
-                      );
-                    },
-                    child: const Text('Sign in',
-                        style: TextStyle(fontSize: 13)),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF202020),
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFFCCCCCC),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      side: const BorderSide(color: Color(0xFF333333)),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Create account coming soon'),
-                          duration: Duration(seconds: 2),
-                        ),
-                      );
-                    },
-                    child: const Text('Create account',
-                        style: TextStyle(fontSize: 13)),
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Signed in',
+                          style: TextStyle(
+                              fontSize: 11, color: Color(0xFF7A7A7A))),
+                      SizedBox(height: 4),
+                      Text('Your projects are saved on this device.',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFFAAAAAA),
+                              height: 1.4)),
+                    ],
                   ),
                 ),
               ],
