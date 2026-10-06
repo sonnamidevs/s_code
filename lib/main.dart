@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -20,11 +21,14 @@ import 'about_screen.dart';
 import 'terminal_screen.dart';
 import 'collaboration_service.dart';
 import 'collaboration_screen.dart';
+import 'file_sync_service.dart';
+import 'notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
   await AuthService().init();
+  await NotificationService().init();
   runApp(const PyIDEApp());
 }
 
@@ -103,12 +107,18 @@ class _MainScaffoldState extends State<MainScaffold>
   bool _altActive = false;
   int _sidebarIndex = 0;
 
+  // Search
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+  List<Map<String, dynamic>> _searchResults = [];
+
   final TextEditingController _outputController = TextEditingController();
   final ScrollController _outputScroll = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final _collab = CollaborationService();
 
   bool _signInPromptShownThisSession = false;
+  int _lastSyncedTabHash = 0;
 
   static const Map<String, Map<String, TextStyle>> _themes = {
     'atom-one-dark': atomOneDarkTheme,
@@ -148,22 +158,76 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     _codeController = CodeController(text: '', language: python);
     _codeController.addListener(_onControllerChanged);
     _loadPrefs();
-    _loadTabs();
-    _setupPython();
+    _initApp();
+
     _collab.codeStream.listen((code) {
-      if (_collab.isConnected) {
-        _isApplyingRemote = true;
-        final sel = _codeController.selection;
-        _codeController.text = code;
-        if (sel.isValid && sel.baseOffset <= code.length) {
-          _codeController.selection = sel;
+      if (!_collab.isConnected) return;
+      if (_codeController.text == code) return;
+      _isApplyingRemote = true;
+      final sel = _codeController.selection;
+      _codeController.text = code;
+      if (sel.isValid && sel.baseOffset <= code.length) {
+        _codeController.selection = sel;
+      }
+      _isApplyingRemote = false;
+    });
+
+    _collab.usersStream.listen((users) {
+      final myUid = AuthService().currentUser?.uid;
+      for (final u in users.values) {
+        if (u.id != myUid) {
+          NotificationService().push(
+            title: '${u.name} joined',
+            body: 'A collaborator is now editing with you.',
+            type: 'collab_join',
+            icon: Icons.person_add_outlined,
+          );
         }
-        _isApplyingRemote = false;
       }
     });
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Future.delayed(const Duration(seconds: 8), _maybeSignInPrompt);
     });
+  }
+
+  Future<void> _initApp() async {
+    await _loadTabs();
+
+    // If signed in, try to sync files from cloud
+    if (AuthService().isSignedIn) {
+      final remote = await FileSyncService().fetchTabs();
+      if (remote != null && remote.isNotEmpty) {
+        final local = _tabs.map((t) => t.toJson()).toList();
+        if (_tabsCountHash(remote) != _tabsCountHash(local)) {
+          if (mounted) {
+            setState(() {
+              _tabs.clear();
+              for (final item in remote) {
+                _tabs.add(EditorTabData.fromJson(item));
+              }
+              if (_activeTab >= _tabs.length) _activeTab = 0;
+              _codeController.text = _tabs[_activeTab].content;
+            });
+            NotificationService().push(
+              title: 'Files synced',
+              body: 'Your files were loaded from the cloud.',
+              type: 'file_sync',
+              icon: Icons.cloud_done_outlined,
+            );
+          }
+        }
+      }
+    }
+    _setupPython();
+  }
+
+  int _tabsCountHash(List<Map<String, dynamic>> tabs) {
+    int h = tabs.length;
+    for (final t in tabs) {
+      h = h * 31 + (t['name'] as String).hashCode;
+    }
+    return h;
   }
 
   @override
@@ -172,7 +236,15 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       _saveTabs();
+      _syncToCloud();
     }
+  }
+
+  Future<void> _syncToCloud() async {
+    if (!AuthService().isSignedIn) return;
+    if (_tabs.isEmpty) return;
+    _tabs[_activeTab].content = _codeController.text;
+    await FileSyncService().uploadTabs(_tabs.map((t) => t.toJson()).toList());
   }
 
   Future<void> _maybeSignInPrompt() async {
@@ -191,7 +263,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: const Text(
-          'Sign in to unlock real-time collaboration →',
+          'Sign in to sync files and collaborate in real time →',
           style: TextStyle(fontSize: 13),
         ),
         duration: const Duration(seconds: 6),
@@ -213,18 +285,27 @@ print(f"2 + 3 = {calc.add(2, 3)}")
       MaterialPageRoute(
         builder: (_) => AuthScreen(
           allowSkip: true,
-          onSignedIn: () {
+          onSignedIn: () async {
             Navigator.pop(context);
             setState(() {});
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Welcome, ${AuthService().displayName}!',
-                    style: const TextStyle(fontSize: 13)),
-                behavior: SnackBarBehavior.floating,
-                backgroundColor: const Color(0xFF252525),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8)),
-              ),
+            await _syncToCloud();
+            final remote = await FileSyncService().fetchTabs();
+            if (remote != null && remote.isNotEmpty && mounted) {
+              setState(() {
+                _tabs.clear();
+                for (final item in remote) {
+                  _tabs.add(EditorTabData.fromJson(item));
+                }
+                if (_activeTab >= _tabs.length) _activeTab = 0;
+                _codeController.text = _tabs[_activeTab].content;
+              });
+            }
+            if (!mounted) return;
+            NotificationService().push(
+              title: 'Welcome, ${AuthService().displayName}!',
+              body: 'Your files are now syncing across devices.',
+              type: 'signed_in',
+              icon: Icons.check_circle_outline,
             );
           },
         ),
@@ -278,6 +359,7 @@ print(f"2 + 3 = {calc.add(2, 3)}")
   void _onControllerChanged() {
     if (_collab.isConnected && !_isApplyingRemote) {
       _collab.sendCode(_codeController.text);
+      _collab.sendCursor(_codeController.selection.baseOffset);
     }
     if (_isAutoIndenting) return;
     final value = _codeController.value;
@@ -310,6 +392,48 @@ print(f"2 + 3 = {calc.add(2, 3)}")
     }
   }
 
+  // ============ SEARCH ============
+  void _runSearch(String q) {
+    final query = q.trim().toLowerCase();
+    if (query.isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    final results = <Map<String, dynamic>>[];
+    for (int t = 0; t < _tabs.length; t++) {
+      final tab = _tabs[t];
+      final content = (t == _activeTab) ? _codeController.text : tab.content;
+      final lines = content.split('\n');
+      for (int i = 0; i < lines.length; i++) {
+        final line = lines[i];
+        if (line.toLowerCase().contains(query)) {
+          results.add({
+            'tabIndex': t,
+            'tabName': tab.name,
+            'line': i + 1,
+            'content': line.trim(),
+          });
+        }
+      }
+    }
+    setState(() => _searchResults = results);
+  }
+
+  void _jumpToResult(Map<String, dynamic> r) {
+    final t = r['tabIndex'] as int;
+    if (t != _activeTab) _switchTab(t);
+    final line = r['line'] as int;
+    final text = _codeController.text;
+    final lines = text.split('\n');
+    int offset = 0;
+    for (int i = 0; i < line - 1 && i < lines.length; i++) {
+      offset += lines[i].length + 1;
+    }
+    _codeController.selection = TextSelection.collapsed(offset: offset);
+    _editorFocus.requestFocus();
+    Navigator.pop(context);
+  }
+
   Future<void> _setupPython() async {
     try {
       _nativeLibDir = await _channel.invokeMethod('getNativeLibraryDir');
@@ -333,7 +457,6 @@ print(f"2 + 3 = {calc.add(2, 3)}")
         final tmpTar = File('${docsDir.path}/py.tar.gz');
         await tmpTar.writeAsBytes(data.buffer.asUint8List());
 
-        // Extract + create libz.so.1 symlinks for pip
         final script = '''
 cd "${root.path}"
 mkdir -p _tmp
@@ -346,12 +469,8 @@ if [ -d "_tmp/lib" ]; then
   cp _tmp/lib/*.so* lib/ 2>/dev/null || true
 fi
 rm -rf _tmp
-
-# Copy native libs into writable python_runtime/lib
 mkdir -p lib
 cp "${_nativeLibDir}"/*.so lib/ 2>/dev/null || true
-
-# Create version symlinks pip and stdlib modules need
 cd lib
 [ -f libz.so ] && ln -sf libz.so libz.so.1
 [ -f libssl.so ] && ln -sf libssl.so libssl.so.3
@@ -464,6 +583,7 @@ cd lib
     setState(() => _activeTab = i);
     _codeController.text = _tabs[i].content;
     _saveTabs();
+    _syncToCloud();
   }
 
   void _newFile() async {
@@ -475,6 +595,7 @@ cd lib
     });
     _codeController.text = '';
     _saveTabs();
+    _syncToCloud();
   }
 
   void _closeTab(int i) {
@@ -484,6 +605,7 @@ cd lib
         _codeController.text = '';
       });
       _saveTabs();
+      _syncToCloud();
       return;
     }
     setState(() {
@@ -492,6 +614,7 @@ cd lib
       _codeController.text = _tabs[_activeTab].content;
     });
     _saveTabs();
+    _syncToCloud();
   }
 
   Future<void> _saveCurrentFile() async {
@@ -500,6 +623,7 @@ cd lib
         _tabs[_activeTab].path ?? '$_pythonRoot/${_tabs[_activeTab].name}';
     await File(targetPath).writeAsString(_tabs[_activeTab].content);
     await _saveTabs();
+    await _syncToCloud();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -532,6 +656,7 @@ cd lib
       });
       _codeController.text = content;
       await _saveTabs();
+      await _syncToCloud();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -555,6 +680,14 @@ cd lib
       case 'close':
         _closeTab(_activeTab);
         break;
+      case 'search':
+        setState(() => _sidebarIndex = 1);
+        _scaffoldKey.currentState?.openDrawer();
+        break;
+      case 'notifications':
+        setState(() => _sidebarIndex = 2);
+        _scaffoldKey.currentState?.openDrawer();
+        break;
       case 'collab':
         if (!AuthService().isSignedIn) {
           _showSignInRequiredDialog();
@@ -566,7 +699,11 @@ cd lib
             builder: (_) => CollaborationScreen(
               onContentReceived: (content) {
                 _isApplyingRemote = true;
+                final sel = _codeController.selection;
                 _codeController.text = content;
+                if (sel.isValid && sel.baseOffset <= content.length) {
+                  _codeController.selection = sel;
+                }
                 _isApplyingRemote = false;
               },
             ),
@@ -615,6 +752,7 @@ cd lib
         break;
       case 'exit':
         await _saveTabs();
+        await _syncToCloud();
         SystemNavigator.pop();
         break;
     }
@@ -632,12 +770,12 @@ cd lib
             Icon(Icons.group_add_outlined,
                 size: 20, color: Color(0xFF4A9EFF)),
             SizedBox(width: 10),
-            Text('Sign in to collaborate',
+            Text('Sign in required',
                 style: TextStyle(fontSize: 15, color: Color(0xFFCCCCCC))),
           ],
         ),
         content: const Text(
-          'Create a free account to collaborate in real time with anyone, on any device. Your code stays private — only people with your session code can join.',
+          'Sign in to sync files across devices and collaborate in real time.',
           style: TextStyle(fontSize: 13, height: 1.5, color: Color(0xFFAAAAAA)),
         ),
         actions: [
@@ -671,19 +809,19 @@ cd lib
     _editorFocus.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final viewInsets = MediaQuery.of(context).viewInsets.bottom;
-    final user = AuthService().currentUser;
     return Scaffold(
       key: _scaffoldKey,
       resizeToAvoidBottomInset: false,
       drawer: Drawer(
         backgroundColor: const Color(0xFF1A1A1A),
-        width: MediaQuery.of(context).size.width * 0.78,
+        width: MediaQuery.of(context).size.width * 0.82,
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.only(
             topRight: Radius.circular(14),
@@ -699,18 +837,14 @@ cd lib
             if (i >= 0) _switchTab(i);
             Navigator.pop(context);
           },
-          userName: AuthService().displayName,
-          userEmail: user?.email ?? '',
-          isSignedIn: user != null,
-          onSignInTap: () {
-            Navigator.pop(context);
-            _openSignIn();
+          searchController: _searchController,
+          searchQuery: _searchQuery,
+          searchResults: _searchResults,
+          onSearchChanged: (q) {
+            _searchQuery = q;
+            _runSearch(q);
           },
-          onSignOutTap: () async {
-            Navigator.pop(context);
-            await AuthService().signOut();
-            if (mounted) setState(() {});
-          },
+          onResultTap: _jumpToResult,
         ),
       ),
       appBar: _appBar(),
@@ -823,6 +957,9 @@ cd lib
               _mi('files', Icons.folder_open_outlined, 'Files'),
               _mi('save', Icons.save_outlined, 'Save'),
               _mi('close', Icons.close, 'Close file'),
+              _divider(),
+              _mi('search', Icons.search, 'Search'),
+              _mi('notifications', Icons.notifications_none, 'Notifications'),
               _divider(),
               _mi('collab', Icons.group_add_outlined, 'Collaborate'),
               _mi('terminal', Icons.terminal_outlined, 'Terminal'),
@@ -938,16 +1075,16 @@ cd lib
             fontSize: _fontSize,
             height: 1.5,
           ),
-          gutterStyle: GutterStyle(
-            width: _showLineNumbers ? 56 : 0,
-            showLineNumbers: _showLineNumbers,
+          gutterStyle: const GutterStyle(
+            width: 60,
+            showLineNumbers: true,
             showErrors: false,
             showFoldingHandles: false,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize - 0.5,
+              fontSize: 12,
               height: 1.5,
-              color: const Color(0xFF5C6370),
+              color: Color(0xFF5C6370),
             ),
           ),
         ),
@@ -1224,11 +1361,11 @@ class SidebarContent extends StatelessWidget {
   final ValueChanged<int> onIndexChanged;
   final List<String> files;
   final ValueChanged<String> onFileTap;
-  final String userName;
-  final String userEmail;
-  final bool isSignedIn;
-  final VoidCallback onSignInTap;
-  final VoidCallback onSignOutTap;
+  final TextEditingController searchController;
+  final String searchQuery;
+  final List<Map<String, dynamic>> searchResults;
+  final ValueChanged<String> onSearchChanged;
+  final ValueChanged<Map<String, dynamic>> onResultTap;
 
   const SidebarContent({
     super.key,
@@ -1236,11 +1373,11 @@ class SidebarContent extends StatelessWidget {
     required this.onIndexChanged,
     required this.files,
     required this.onFileTap,
-    required this.userName,
-    required this.userEmail,
-    required this.isSignedIn,
-    required this.onSignInTap,
-    required this.onSignOutTap,
+    required this.searchController,
+    required this.searchQuery,
+    required this.searchResults,
+    required this.onSearchChanged,
+    required this.onResultTap,
   });
 
   @override
@@ -1305,10 +1442,9 @@ class SidebarContent extends StatelessWidget {
       case 0:
         return _filesPanel();
       case 1:
-        return _placeholder('SEARCH', Icons.search, 'No search yet.');
+        return _searchPanel();
       case 2:
-        return _placeholder(
-            'ALERTS', Icons.notifications_none, 'No notifications.');
+        return _notificationsPanel();
       case 3:
         return _placeholder(
             'FAVORITES', Icons.favorite_border, 'No favorites yet.');
@@ -1376,6 +1512,219 @@ class SidebarContent extends StatelessWidget {
     );
   }
 
+  Widget _searchPanel() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
+          child: Text('SEARCH',
+              style: TextStyle(
+                fontSize: 10,
+                letterSpacing: 1.5,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF7A7A7A),
+              )),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: TextField(
+            controller: searchController,
+            onChanged: onSearchChanged,
+            style: const TextStyle(fontSize: 13, color: Color(0xFFCCCCCC)),
+            decoration: InputDecoration(
+              hintText: 'Search in all files...',
+              hintStyle: const TextStyle(
+                  fontSize: 12.5, color: Color(0xFF5A5A5A)),
+              prefixIcon: const Icon(Icons.search,
+                  size: 16, color: Color(0xFF888888)),
+              filled: true,
+              fillColor: const Color(0xFF202020),
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10, vertical: 10),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        if (searchQuery.isEmpty)
+          const Expanded(
+            child: Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Text('Type to search across all open files.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 12, color: Color(0xFF666666))),
+              ),
+            ),
+          )
+        else if (searchResults.isEmpty)
+          const Expanded(
+            child: Center(
+              child: Text('No matches',
+                  style:
+                      TextStyle(fontSize: 12, color: Color(0xFF666666))),
+            ),
+          )
+        else
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              itemCount: searchResults.length,
+              itemBuilder: (_, i) {
+                final r = searchResults[i];
+                return InkWell(
+                  onTap: () => onResultTap(r),
+                  borderRadius: BorderRadius.circular(7),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 9),
+                    margin: const EdgeInsets.only(bottom: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF202020),
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.description_outlined,
+                                size: 12, color: Color(0xFF4A9EFF)),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                '${r['tabName']}:${r['line']}',
+                                style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF888888),
+                                    fontWeight: FontWeight.w500),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(r['content'] as String,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12.5,
+                                color: Color(0xFFCCCCCC),
+                                fontFamily: 'monospace')),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _notificationsPanel() {
+    return StreamBuilder<List<AppNotification>>(
+      stream: NotificationService().stream,
+      initialData: NotificationService().items,
+      builder: (context, snapshot) {
+        final items = snapshot.data ?? [];
+        return Column(
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
+                    child: Text('NOTIFICATIONS',
+                        style: TextStyle(
+                          fontSize: 10,
+                          letterSpacing: 1.5,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF7A7A7A),
+                        )),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline,
+                      size: 16, color: Color(0xFF7A7A7A)),
+                  onPressed: () => NotificationService().clear(),
+                ),
+              ],
+            ),
+            Expanded(
+              child: items.isEmpty
+                  ? const Center(
+                      child: Text('No notifications',
+                          style: TextStyle(
+                              fontSize: 12, color: Color(0xFF666666))),
+                    )
+                  : ListView.builder(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 6),
+                      itemCount: items.length,
+                      itemBuilder: (_, i) {
+                        final n = items[i];
+                        return Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 6),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF202020),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(n.icon,
+                                  size: 16, color: const Color(0xFF4A9EFF)),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(n.title,
+                                        style: const TextStyle(
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w600,
+                                            color: Color(0xFFCCCCCC))),
+                                    const SizedBox(height: 3),
+                                    Text(n.body,
+                                        style: const TextStyle(
+                                            fontSize: 11.5,
+                                            color: Color(0xFFAAAAAA),
+                                            height: 1.4)),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                        _timeAgo(n.timestamp),
+                                        style: const TextStyle(
+                                            fontSize: 10,
+                                            color: Color(0xFF666666))),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _timeAgo(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+
   Widget _placeholder(String title, IconData icon, String msg) {
     return Column(
       children: [
@@ -1415,6 +1764,7 @@ class SidebarContent extends StatelessWidget {
   }
 
   Widget _profilePanel(BuildContext context) {
+    final signed = AuthService().isSignedIn;
     return Column(
       children: [
         const Padding(
@@ -1433,7 +1783,7 @@ class SidebarContent extends StatelessWidget {
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
-            child: isSignedIn ? _signedInProfile(context) : _signedOutProfile(context),
+            child: signed ? _signedInProfile(context) : _signedOutProfile(context),
           ),
         ),
       ],
@@ -1441,6 +1791,7 @@ class SidebarContent extends StatelessWidget {
   }
 
   Widget _signedInProfile(BuildContext context) {
+    final verified = AuthService().isEmailVerified;
     return Column(
       children: [
         Container(
@@ -1454,7 +1805,9 @@ class SidebarContent extends StatelessWidget {
           ),
           child: Center(
             child: Text(
-              userName.isNotEmpty ? userName[0].toUpperCase() : '?',
+              AuthService().displayName.isNotEmpty
+                  ? AuthService().displayName[0].toUpperCase()
+                  : '?',
               style: const TextStyle(
                 fontSize: 26,
                 fontWeight: FontWeight.bold,
@@ -1465,7 +1818,7 @@ class SidebarContent extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         Text(
-          userName,
+          AuthService().displayName,
           style: const TextStyle(
             fontSize: 14,
             color: Color(0xFFCCCCCC),
@@ -1474,13 +1827,64 @@ class SidebarContent extends StatelessWidget {
         ),
         const SizedBox(height: 3),
         Text(
-          userEmail,
+          AuthService().email,
           style: const TextStyle(
             fontSize: 11.5,
             color: Color(0xFF7A7A7A),
           ),
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 16),
+        if (!verified)
+          Container(
+            padding: const EdgeInsets.all(12),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFD29922).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                  color: const Color(0xFFD29922).withOpacity(0.4)),
+            ),
+            child: Column(
+              children: [
+                const Text('Email not verified',
+                    style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFD29922))),
+                const SizedBox(height: 4),
+                const Text(
+                    'Check your inbox and click the verification link.',
+                    style: TextStyle(
+                        fontSize: 11.5,
+                        color: Color(0xFFAAAAAA),
+                        height: 1.4)),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () async {
+                      await AuthService().resendVerification();
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Verification email sent')),
+                        );
+                      }
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFD29922),
+                      side: const BorderSide(color: Color(0xFFD29922)),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Resend',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(12),
@@ -1495,28 +1899,12 @@ class SidebarContent extends StatelessWidget {
                   style:
                       TextStyle(fontSize: 11, color: Color(0xFF7A7A7A))),
               SizedBox(height: 4),
-              Text('Collaborate with anyone, anywhere.',
+              Text('Files sync automatically. Collaborate anytime.',
                   style: TextStyle(
                       fontSize: 12,
                       color: Color(0xFFAAAAAA),
                       height: 1.4)),
             ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFFFF6B6B),
-              padding: const EdgeInsets.symmetric(vertical: 11),
-              side: const BorderSide(color: Color(0xFF333333)),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-            ),
-            onPressed: onSignOutTap,
-            child: const Text('Sign out',
-                style: TextStyle(fontSize: 12.5)),
           ),
         ),
       ],
@@ -1549,7 +1937,7 @@ class SidebarContent extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         const Text(
-          'Sign in to collaborate with others in real time.',
+          'Sign in to sync files and collaborate in real time.',
           textAlign: TextAlign.center,
           style: TextStyle(
             fontSize: 12,
@@ -1568,7 +1956,9 @@ class SidebarContent extends StatelessWidget {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8)),
             ),
-            onPressed: onSignInTap,
+            onPressed: () {
+              Navigator.pop(context);
+            },
             child: const Text('Sign in',
                 style: TextStyle(fontSize: 13)),
           ),

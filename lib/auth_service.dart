@@ -17,6 +17,7 @@ class AuthService {
 
   User? get currentUser => _auth.currentUser;
   bool get isSignedIn => _auth.currentUser != null;
+  bool get isEmailVerified => _auth.currentUser?.emailVerified ?? false;
 
   String get displayName {
     final u = _auth.currentUser;
@@ -28,7 +29,6 @@ class AuthService {
 
   Future<void> init() async {
     // Firebase Auth persists sessions automatically.
-    // Nothing to do.
   }
 
   Future<AuthResult> signUp({
@@ -55,8 +55,8 @@ class AuthService {
         password: password,
       );
       await cred.user?.updateDisplayName(cleanName);
+      await cred.user?.sendEmailVerification();
 
-      // Store profile in Firestore
       await _db.collection('users').doc(cred.user!.uid).set({
         'uid': cred.user!.uid,
         'username': cleanName,
@@ -68,7 +68,7 @@ class AuthService {
     } on FirebaseAuthException catch (e) {
       return AuthResult(success: false, error: _friendly(e));
     } catch (e) {
-      return AuthResult(success: false, error: 'Something went wrong. Try again.');
+      return AuthResult(success: false, error: 'Something went wrong.');
     }
   }
 
@@ -89,8 +89,19 @@ class AuthService {
     } on FirebaseAuthException catch (e) {
       return AuthResult(success: false, error: _friendly(e));
     } catch (e) {
-      return AuthResult(success: false, error: 'Something went wrong. Try again.');
+      return AuthResult(success: false, error: 'Something went wrong.');
     }
+  }
+
+  Future<void> resendVerification() async {
+    final user = _auth.currentUser;
+    if (user != null && !user.emailVerified) {
+      await user.sendEmailVerification();
+    }
+  }
+
+  Future<void> reload() async {
+    await _auth.currentUser?.reload();
   }
 
   Future<void> signOut() async {
