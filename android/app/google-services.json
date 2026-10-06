@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "261505205226",
+    "project_id": "pyide-96d6c",
+    "storage_bucket": "pyide-96d6c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:261505205226:android:04805134f25e9fe301a893",
+        "android_client_info": {
+          "package_name": "com.sonnamidevs.s_code"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDCcWs-18aEPafzZM4CsGLOpgtnNBD8va8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
