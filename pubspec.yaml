@@ -12,6 +12,8 @@ dependencies:
   path_provider: ^2.1.4
   file_picker: ^8.0.0
   flutter_code_editor: ^0.3.2
+  xterm: ^4.0.0
+  flutter_pty: ^0.4.2
   highlight: ^0.7.0
   flutter_highlight: ^0.7.0
   shared_preferences: ^2.2.0

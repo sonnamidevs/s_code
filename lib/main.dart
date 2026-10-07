@@ -44,6 +44,14 @@ class PyIDEApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF1E1E1E),
+        // === [MODIFIED] Added readable SnackBar Theme ===
+        snackBarTheme: const SnackBarThemeData(
+          backgroundColor: Color(0xFF2C2C2C),
+          contentTextStyle: TextStyle(color: Colors.white, fontSize: 13),
+          actionTextColor: Color(0xFF4A9EFF),
+          behavior: SnackBarBehavior.floating,
+          elevation: 6.0,
+        ),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF4A9EFF),
           surface: Color(0xFF1E1E1E),
@@ -85,6 +93,8 @@ class _MainScaffoldState extends State<MainScaffold>
 
   bool _isSetupComplete = false;
   bool _isRunning = false;
+  // === [MODIFIED] Added Process tracking for infinite loops ===
+  Process? _currentProcess; 
   String? _nativeLibDir;
   String? _pythonRoot;
 
@@ -107,7 +117,6 @@ class _MainScaffoldState extends State<MainScaffold>
   bool _altActive = false;
   int _sidebarIndex = 0;
 
-  // Search
   final _searchController = TextEditingController();
   String _searchQuery = '';
   List<Map<String, dynamic>> _searchResults = [];
@@ -193,8 +202,6 @@ print(f"2 + 3 = {calc.add(2, 3)}")
 
   Future<void> _initApp() async {
     await _loadTabs();
-
-    // If signed in, try to sync files from cloud
     if (AuthService().isSignedIn) {
       final remote = await FileSyncService().fetchTabs();
       if (remote != null && remote.isNotEmpty) {
@@ -508,56 +515,106 @@ cd lib
     };
   }
 
-  Future<void> _runCode() async {
-    if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) {
-      return;
+  // === [MODIFIED] Sandboxed Save Directory Logic ===
+  Future<String> _getSaveDirectory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final useExternal = prefs.getBool('use_external_storage') ?? false;
+
+    if (useExternal) {
+      final path = prefs.getString('external_storage_path');
+      if (path != null && await Directory(path).exists()) {
+        return path;
+      }
     }
+
+    // Default: Sandboxed "home" folder in app storage
+    final appDir = await getApplicationDocumentsDirectory();
+    final homeDir = Directory('${appDir.path}/home');
+    if (!await homeDir.exists()) {
+      await homeDir.create(recursive: true);
+    }
+    return homeDir.path;
+  }
+
+  // === [MODIFIED] Real-Time Console Execution (Infinite Loop Fix) ===
+  Future<void> _runCode() async {
+    if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) return;
     FocusScope.of(context).unfocus();
+
     setState(() {
       _isRunning = true;
       _showConsole = true;
+      _outputController.clear();
     });
 
     _append('');
     _append('▶ ${DateTime.now().toString().substring(11, 19)}');
     _append('─' * 40);
 
-    final scriptFile = File('$_pythonRoot/script.py');
+    final dir = await _getSaveDirectory();
+    final scriptFile = File('$dir/script.py');
     await scriptFile.writeAsString(_codeController.text);
 
     try {
-      final cmd =
-          '"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"';
-      final result = await Process.run(
+      final cmd = '"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"';
+      
+      // Use Process.start instead of Process.run for real-time streaming
+      _currentProcess = await Process.start(
         '/system/bin/sh',
         ['-c', cmd],
         environment: _runEnv(),
         includeParentEnvironment: true,
       );
-      if ((result.stdout as String).isNotEmpty) {
-        _append(result.stdout as String);
+
+      // Stream stdout in real-time
+      _currentProcess!.stdout.transform(utf8.decoder).listen((data) {
+        if (mounted) {
+          _outputController.text += data;
+          _scrollToBottom();
+        }
+      });
+
+      // Stream stderr in real-time
+      _currentProcess!.stderr.transform(utf8.decoder).listen((data) {
+        if (mounted) {
+          _outputController.text += data;
+          _scrollToBottom();
+        }
+      });
+
+      final exitCode = await _currentProcess!.exitCode;
+      if (mounted) {
+        _append('─' * 40);
+        _append('[Done] exit $exitCode');
+        setState(() => _isRunning = false);
       }
-      if ((result.stderr as String).isNotEmpty) {
-        _append(result.stderr as String);
-      }
-      _append('─' * 40);
-      _append('[Done] exit ${result.exitCode}');
     } catch (e) {
-      _append('Run error: $e');
-    } finally {
-      setState(() => _isRunning = false);
+      if (mounted) {
+        _append('Run error: $e');
+        setState(() => _isRunning = false);
+      }
     }
+  }
+
+  void _stopCode() {
+    _currentProcess?.kill();
+    setState(() => _isRunning = false);
+    _append('Process stopped by user');
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_outputScroll.hasClients) {
+        _outputScroll.animateTo(_outputScroll.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut);
+      }
+    });
   }
 
   void _append(String text) {
     _outputController.text += '$text\n';
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_outputScroll.hasClients) {
-        _outputScroll.animateTo(_outputScroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 150),
-            curve: Curves.easeOut);
-      }
-    });
+    _scrollToBottom();
   }
 
   void _clearConsole() => setState(() => _outputController.clear());
@@ -617,31 +674,41 @@ cd lib
     _syncToCloud();
   }
 
+  // === [MODIFIED] Save File using Sandbox Logic ===
   Future<void> _saveCurrentFile() async {
     _tabs[_activeTab].content = _codeController.text;
-    final targetPath =
-        _tabs[_activeTab].path ?? '$_pythonRoot/${_tabs[_activeTab].name}';
-    await File(targetPath).writeAsString(_tabs[_activeTab].content);
-    await _saveTabs();
-    await _syncToCloud();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Saved ${_tabs[_activeTab].name}',
-              style: const TextStyle(fontSize: 13)),
-          duration: const Duration(seconds: 1),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF2A2A2A),
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8)),
-        ),
-      );
+    final dir = await _getSaveDirectory();
+    final targetPath = _tabs[_activeTab].path ?? '$dir/${_tabs[_activeTab].name}';
+    
+    try {
+      await File(targetPath).writeAsString(_tabs[_activeTab].content);
+      _tabs[_activeTab].path = targetPath; // Update path so it saves correctly next time
+      await _saveTabs();
+      await _syncToCloud();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved ${_tabs[_activeTab].name}',
+                style: const TextStyle(fontSize: 13)),
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed: $e')),
+        );
+      }
     }
   }
 
+  // === [MODIFIED] Open File using Sandbox Logic ===
   Future<void> _openFileFromDevice() async {
     try {
+      final dir = await _getSaveDirectory();
       final result = await FilePicker.platform.pickFiles(
+        initialDirectory: dir,
         type: FileType.any,
         allowMultiple: false,
       );
@@ -668,18 +735,10 @@ cd lib
 
   void _handleMenu(String v) async {
     switch (v) {
-      case 'new':
-        _newFile();
-        break;
-      case 'files':
-        _openFileFromDevice();
-        break;
-      case 'save':
-        await _saveCurrentFile();
-        break;
-      case 'close':
-        _closeTab(_activeTab);
-        break;
+      case 'new': _newFile(); break;
+      case 'files': _openFileFromDevice(); break;
+      case 'save': await _saveCurrentFile(); break;
+      case 'close': _closeTab(_activeTab); break;
       case 'search':
         setState(() => _sidebarIndex = 1);
         _scaffoldKey.currentState?.openDrawer();
@@ -731,21 +790,15 @@ cd lib
               initialShowLineNumbers: _showLineNumbers,
               onFontSizeChanged: (v) => setState(() => _fontSize = v),
               onThemeChanged: (k) => setState(() => _themeName = k),
-              onLineNumbersChanged: (v) =>
-                  setState(() => _showLineNumbers = v),
+              onLineNumbersChanged: (v) => setState(() => _showLineNumbers = v),
             ),
           ),
         );
         break;
       case 'about':
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const AboutScreen()),
-        );
+        Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen()));
         break;
-      case 'signin':
-        _openSignIn();
-        break;
+      case 'signin': _openSignIn(); break;
       case 'signout':
         await AuthService().signOut();
         if (mounted) setState(() {});
@@ -763,15 +816,12 @@ cd lib
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF252525),
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(Icons.group_add_outlined,
-                size: 20, color: Color(0xFF4A9EFF)),
+            Icon(Icons.group_add_outlined, size: 20, color: Color(0xFF4A9EFF)),
             SizedBox(width: 10),
-            Text('Sign in required',
-                style: TextStyle(fontSize: 15, color: Color(0xFFCCCCCC))),
+            Text('Sign in required', style: TextStyle(fontSize: 15, color: Color(0xFFCCCCCC))),
           ],
         ),
         content: const Text(
@@ -781,18 +831,11 @@ cd lib
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Later',
-                style: TextStyle(color: Color(0xFF888888))),
+            child: const Text('Later', style: TextStyle(color: Color(0xFF888888))),
           ),
           FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _openSignIn();
-            },
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF4A9EFF),
-              foregroundColor: Colors.white,
-            ),
+            onPressed: () { Navigator.pop(ctx); _openSignIn(); },
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF4A9EFF), foregroundColor: Colors.white),
             child: const Text('Sign In'),
           ),
         ],
@@ -840,10 +883,7 @@ cd lib
           searchController: _searchController,
           searchQuery: _searchQuery,
           searchResults: _searchResults,
-          onSearchChanged: (q) {
-            _searchQuery = q;
-            _runSearch(q);
-          },
+          onSearchChanged: (q) { _searchQuery = q; _runSearch(q); },
           onResultTap: _jumpToResult,
         ),
       ),
@@ -859,17 +899,13 @@ cd lib
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final total = constraints.maxHeight;
-                      final consoleH =
-                          (_showConsole ? total * _consoleFraction : 0)
-                              .toDouble();
-                      final editorH =
-                          total - consoleH - (_showConsole ? 10 : 0);
+                      final consoleH = (_showConsole ? total * _consoleFraction : 0).toDouble();
+                      final editorH = total - consoleH - (_showConsole ? 10 : 0);
                       return Column(
                         children: [
                           SizedBox(height: editorH, child: _editor()),
                           if (_showConsole) _dragHandle(total),
-                          if (_showConsole)
-                            SizedBox(height: consoleH, child: _console()),
+                          if (_showConsole) SizedBox(height: consoleH, child: _console()),
                         ],
                       );
                     },
@@ -907,39 +943,28 @@ cd lib
       title: Text(
         _tabs[_activeTab].name,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
-          fontSize: 13.5,
-          fontWeight: FontWeight.w400,
-          color: Color(0xFFCCCCCC),
-        ),
+        style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w400, color: Color(0xFFCCCCCC)),
       ),
       actions: [
         IconButton(
-          icon: const Icon(Icons.edit_outlined,
-              size: 17, color: Color(0xFFAAAAAA)),
+          icon: const Icon(Icons.edit_outlined, size: 17, color: Color(0xFFAAAAAA)),
           splashRadius: 22,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
           onPressed: _saveCurrentFile,
         ),
+        // === [MODIFIED] Run/Stop Button Toggle ===
         IconButton(
           icon: _isRunning
-              ? const SizedBox(
-                  width: 15,
-                  height: 15,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 1.7, color: Color(0xFF4A9EFF)),
-                )
-              : const Icon(Icons.play_arrow_rounded,
-                  size: 22, color: Color(0xFF4A9EFF)),
+              ? const Icon(Icons.stop_rounded, size: 22, color: Colors.redAccent)
+              : const Icon(Icons.play_arrow_rounded, size: 22, color: Color(0xFF4A9EFF)),
           splashRadius: 22,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
-          onPressed: _isSetupComplete && !_isRunning ? _runCode : null,
+          onPressed: _isSetupComplete ? (_isRunning ? _stopCode : _runCode) : null,
         ),
         PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert,
-              size: 18, color: Color(0xFFAAAAAA)),
+          icon: const Icon(Icons.more_vert, size: 18, color: Color(0xFFAAAAAA)),
           splashRadius: 22,
           iconSize: 18,
           color: const Color(0xFF252525),
@@ -967,10 +992,8 @@ cd lib
               _mi('settings', Icons.settings_outlined, 'Settings'),
               _mi('about', Icons.info_outline, 'About'),
               _divider(),
-              if (!signed)
-                _mi('signin', Icons.login, 'Sign in')
-              else
-                _mi('signout', Icons.person_remove_outlined, 'Sign out'),
+              if (!signed) _mi('signin', Icons.login, 'Sign in')
+              else _mi('signout', Icons.person_remove_outlined, 'Sign out'),
               _mi('exit', Icons.logout_outlined, 'Exit'),
             ];
           },
@@ -989,21 +1012,13 @@ cd lib
         children: [
           Icon(i, size: 16, color: const Color(0xFFAAAAAA)),
           const SizedBox(width: 14),
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 13.5,
-              fontWeight: FontWeight.w400,
-              color: Color(0xFFCCCCCC),
-            ),
-          ),
+          Text(label, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w400, color: Color(0xFFCCCCCC))),
         ],
       ),
     );
   }
 
-  PopupMenuDivider _divider() =>
-      const PopupMenuDivider(height: 1, color: Color(0xFF2A2A2A));
+  PopupMenuDivider _divider() => const PopupMenuDivider(height: 1, color: Color(0xFF2A2A2A));
 
   Widget _tabsBar() {
     return Container(
@@ -1022,33 +1037,18 @@ cd lib
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10),
                 decoration: BoxDecoration(
-                  color:
-                      active ? const Color(0xFF252525) : Colors.transparent,
+                  color: active ? const Color(0xFF252525) : Colors.transparent,
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.description_outlined,
-                        size: 12,
-                        color: active
-                            ? const Color(0xFF4A9EFF)
-                            : const Color(0xFF666666)),
+                    Icon(Icons.description_outlined, size: 12, color: active ? const Color(0xFF4A9EFF) : const Color(0xFF666666)),
                     const SizedBox(width: 6),
-                    Text(
-                      _tabs[i].name,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w400,
-                        color: active
-                            ? const Color(0xFFCCCCCC)
-                            : const Color(0xFF7A7A7A),
-                      ),
-                    ),
+                    Text(_tabs[i].name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w400, color: active ? const Color(0xFFCCCCCC) : const Color(0xFF7A7A7A))),
                     const SizedBox(width: 6),
                     GestureDetector(
                       onTap: () => _closeTab(i),
-                      child: const Icon(Icons.close,
-                          size: 12, color: Color(0xFF666666)),
+                      child: const Icon(Icons.close, size: 12, color: Color(0xFF666666)),
                     ),
                   ],
                 ),
@@ -1060,7 +1060,23 @@ cd lib
     );
   }
 
+  // === [MODIFIED] Dynamic Line Numbers (Scales up to 5 digits) ===
   Widget _editor() {
+    final lineCount = '\n'.allMatches(_codeController.text).length + 1;
+    final digits = lineCount.toString().length;
+    
+    // Scale gutter width based on digits
+    double gutterWidth = 60;
+    double gutterFontSize = 12;
+    
+    if (digits == 4) {
+      gutterWidth = 72;
+      gutterFontSize = 11;
+    } else if (digits >= 5) {
+      gutterWidth = 84;
+      gutterFontSize = 9.5;
+    }
+
     return Container(
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
@@ -1075,16 +1091,16 @@ cd lib
             fontSize: _fontSize,
             height: 1.5,
           ),
-          gutterStyle: const GutterStyle(
-            width: 60,
-            showLineNumbers: true,
+          gutterStyle: GutterStyle(
+            width: gutterWidth,
+            showLineNumbers: _showLineNumbers,
             showErrors: false,
             showFoldingHandles: false,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: 12,
+              fontSize: gutterFontSize,
               height: 1.5,
-              color: Color(0xFF5C6370),
+              color: const Color(0xFF5C6370),
             ),
           ),
         ),
@@ -1135,23 +1151,11 @@ cd lib
             child: Row(
               children: [
                 _icon(Icons.backspace_outlined, _clearConsole),
-                _icon(Icons.keyboard_hide_outlined, () {
-                  FocusScope.of(context).unfocus();
-                }),
+                _icon(Icons.keyboard_hide_outlined, () => FocusScope.of(context).unfocus()),
                 const Spacer(),
-                const Text(
-                  'OUTPUT',
-                  style: TextStyle(
-                    fontSize: 10,
-                    letterSpacing: 1.4,
-                    fontWeight: FontWeight.w500,
-                    color: Color(0xFF6A6A6A),
-                  ),
-                ),
+                const Text('OUTPUT', style: TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w500, color: Color(0xFF6A6A6A))),
                 const Spacer(),
-                _icon(Icons.close, () {
-                  setState(() => _showConsole = false);
-                }),
+                _icon(Icons.close, () => setState(() => _showConsole = false)),
               ],
             ),
           ),
@@ -1160,25 +1164,13 @@ cd lib
               padding: const EdgeInsets.all(8),
               child: _outputController.text.isEmpty
                   ? const Center(
-                      child: Text(
-                        'Output will appear here',
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 11.5,
-                          color: Color(0xFF5A5A5A),
-                        ),
-                      ),
+                      child: Text('Output will appear here', style: TextStyle(fontFamily: 'monospace', fontSize: 11.5, color: Color(0xFF5A5A5A))),
                     )
                   : SingleChildScrollView(
                       controller: _outputScroll,
                       child: Text(
                         _outputController.text,
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 11.5,
-                          height: 1.5,
-                          color: Color(0xFFCCCCCC),
-                        ),
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 11.5, height: 1.5, color: Color(0xFFCCCCCC)),
                       ),
                     ),
             ),
@@ -1274,17 +1266,12 @@ cd lib
                     },
                     borderRadius: BorderRadius.circular(5),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: active
-                            ? const Color(0xFF4A9EFF).withOpacity(0.22)
-                            : const Color(0xFF252525),
+                        color: active ? const Color(0xFF4A9EFF).withOpacity(0.22) : const Color(0xFF252525),
                         borderRadius: BorderRadius.circular(5),
                         border: Border.all(
-                          color: active
-                              ? const Color(0xFF4A9EFF)
-                              : Colors.transparent,
+                          color: active ? const Color(0xFF4A9EFF) : Colors.transparent,
                           width: 1,
                         ),
                       ),
@@ -1295,9 +1282,7 @@ cd lib
                             fontFamily: 'monospace',
                             fontSize: 11.5,
                             fontWeight: FontWeight.w500,
-                            color: active
-                                ? const Color(0xFF4A9EFF)
-                                : const Color(0xFFCCCCCC),
+                            color: active ? const Color(0xFF4A9EFF) : const Color(0xFFCCCCCC),
                           ),
                         ),
                       ),
@@ -1344,9 +1329,7 @@ cd lib
           setState(() => _showConsole = !_showConsole);
         },
         child: Icon(
-          _showConsole
-              ? Icons.keyboard_arrow_down
-              : Icons.keyboard_arrow_up,
+          _showConsole ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up,
           color: const Color(0xFFAAAAAA),
           size: 20,
         ),
@@ -1427,9 +1410,7 @@ class SidebarContent extends StatelessWidget {
             child: Icon(
               icon,
               size: 18,
-              color: active
-                  ? const Color(0xFF4A9EFF)
-                  : const Color(0xFF7A7A7A),
+              color: active ? const Color(0xFF4A9EFF) : const Color(0xFF7A7A7A),
             ),
           ),
         ),
@@ -1439,19 +1420,12 @@ class SidebarContent extends StatelessWidget {
 
   Widget _content(BuildContext context) {
     switch (activeIndex) {
-      case 0:
-        return _filesPanel();
-      case 1:
-        return _searchPanel();
-      case 2:
-        return _notificationsPanel();
-      case 3:
-        return _placeholder(
-            'FAVORITES', Icons.favorite_border, 'No favorites yet.');
-      case 4:
-        return _profilePanel(context);
-      default:
-        return const SizedBox.shrink();
+      case 0: return _filesPanel();
+      case 1: return _searchPanel();
+      case 2: return _notificationsPanel();
+      case 3: return _placeholder('FAVORITES', Icons.favorite_border, 'No favorites yet.');
+      case 4: return _profilePanel(context);
+      default: return const SizedBox.shrink();
     }
   }
 
@@ -1461,24 +1435,13 @@ class SidebarContent extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
-          child: Text('FILES',
-              style: TextStyle(
-                fontSize: 10,
-                letterSpacing: 1.5,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF7A7A7A),
-              )),
+          child: Text('FILES', style: TextStyle(fontSize: 10, letterSpacing: 1.5, fontWeight: FontWeight.w600, color: Color(0xFF7A7A7A))),
         ),
         Expanded(
           child: files.isEmpty
-              ? const Center(
-                  child: Text('No files open',
-                      style: TextStyle(
-                          fontSize: 12, color: Color(0xFF666666))),
-                )
+              ? const Center(child: Text('No files open', style: TextStyle(fontSize: 12, color: Color(0xFF666666))))
               : ListView.builder(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                   itemCount: files.length,
                   itemBuilder: (_, i) {
                     final name = files[i];
@@ -1486,21 +1449,13 @@ class SidebarContent extends StatelessWidget {
                       onTap: () => onFileTap(name),
                       borderRadius: BorderRadius.circular(7),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 9),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                         margin: const EdgeInsets.only(bottom: 2),
                         child: Row(
                           children: [
-                            const Icon(Icons.description_outlined,
-                                size: 15, color: Color(0xFF4A9EFF)),
+                            const Icon(Icons.description_outlined, size: 15, color: Color(0xFF4A9EFF)),
                             const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(name,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      color: Color(0xFFCCCCCC))),
-                            ),
+                            Expanded(child: Text(name, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, color: Color(0xFFCCCCCC)))),
                           ],
                         ),
                       ),
@@ -1518,13 +1473,7 @@ class SidebarContent extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
-          child: Text('SEARCH',
-              style: TextStyle(
-                fontSize: 10,
-                letterSpacing: 1.5,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF7A7A7A),
-              )),
+          child: Text('SEARCH', style: TextStyle(fontSize: 10, letterSpacing: 1.5, fontWeight: FontWeight.w600, color: Color(0xFF7A7A7A))),
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1534,42 +1483,20 @@ class SidebarContent extends StatelessWidget {
             style: const TextStyle(fontSize: 13, color: Color(0xFFCCCCCC)),
             decoration: InputDecoration(
               hintText: 'Search in all files...',
-              hintStyle: const TextStyle(
-                  fontSize: 12.5, color: Color(0xFF5A5A5A)),
-              prefixIcon: const Icon(Icons.search,
-                  size: 16, color: Color(0xFF888888)),
+              hintStyle: const TextStyle(fontSize: 12.5, color: Color(0xFF5A5A5A)),
+              prefixIcon: const Icon(Icons.search, size: 16, color: Color(0xFF888888)),
               filled: true,
               fillColor: const Color(0xFF202020),
-              contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 10, vertical: 10),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide.none,
-              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
             ),
           ),
         ),
         const SizedBox(height: 10),
         if (searchQuery.isEmpty)
-          const Expanded(
-            child: Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 20),
-                child: Text('Type to search across all open files.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        fontSize: 12, color: Color(0xFF666666))),
-              ),
-            ),
-          )
+          const Expanded(child: Center(child: Padding(padding: EdgeInsets.symmetric(horizontal: 20), child: Text('Type to search across all open files.', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Color(0xFF666666))))))
         else if (searchResults.isEmpty)
-          const Expanded(
-            child: Center(
-              child: Text('No matches',
-                  style:
-                      TextStyle(fontSize: 12, color: Color(0xFF666666))),
-            ),
-          )
+          const Expanded(child: Center(child: Text('No matches', style: TextStyle(fontSize: 12, color: Color(0xFF666666)))))
         else
           Expanded(
             child: ListView.builder(
@@ -1581,39 +1508,21 @@ class SidebarContent extends StatelessWidget {
                   onTap: () => onResultTap(r),
                   borderRadius: BorderRadius.circular(7),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 9),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                     margin: const EdgeInsets.only(bottom: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF202020),
-                      borderRadius: BorderRadius.circular(7),
-                    ),
+                    decoration: BoxDecoration(color: const Color(0xFF202020), borderRadius: BorderRadius.circular(7)),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
                           children: [
-                            const Icon(Icons.description_outlined,
-                                size: 12, color: Color(0xFF4A9EFF)),
+                            const Icon(Icons.description_outlined, size: 12, color: Color(0xFF4A9EFF)),
                             const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                '${r['tabName']}:${r['line']}',
-                                style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Color(0xFF888888),
-                                    fontWeight: FontWeight.w500),
-                              ),
-                            ),
+                            Expanded(child: Text('${r['tabName']}:${r['line']}', style: const TextStyle(fontSize: 11, color: Color(0xFF888888), fontWeight: FontWeight.w500))),
                           ],
                         ),
                         const SizedBox(height: 4),
-                        Text(r['content'] as String,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 12.5,
-                                color: Color(0xFFCCCCCC),
-                                fontFamily: 'monospace')),
+                        Text(r['content'] as String, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, color: Color(0xFFCCCCCC), fontFamily: 'monospace')),
                       ],
                     ),
                   ),
@@ -1638,70 +1547,41 @@ class SidebarContent extends StatelessWidget {
                 const Expanded(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
-                    child: Text('NOTIFICATIONS',
-                        style: TextStyle(
-                          fontSize: 10,
-                          letterSpacing: 1.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF7A7A7A),
-                        )),
+                    child: Text('NOTIFICATIONS', style: TextStyle(fontSize: 10, letterSpacing: 1.5, fontWeight: FontWeight.w600, color: Color(0xFF7A7A7A))),
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.delete_outline,
-                      size: 16, color: Color(0xFF7A7A7A)),
+                  icon: const Icon(Icons.delete_outline, size: 16, color: Color(0xFF7A7A7A)),
                   onPressed: () => NotificationService().clear(),
                 ),
               ],
             ),
             Expanded(
               child: items.isEmpty
-                  ? const Center(
-                      child: Text('No notifications',
-                          style: TextStyle(
-                              fontSize: 12, color: Color(0xFF666666))),
-                    )
+                  ? const Center(child: Text('No notifications', style: TextStyle(fontSize: 12, color: Color(0xFF666666))))
                   : ListView.builder(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
                       itemCount: items.length,
                       itemBuilder: (_, i) {
                         final n = items[i];
                         return Container(
                           padding: const EdgeInsets.all(12),
                           margin: const EdgeInsets.only(bottom: 6),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF202020),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                          decoration: BoxDecoration(color: const Color(0xFF202020), borderRadius: BorderRadius.circular(8)),
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Icon(n.icon,
-                                  size: 16, color: const Color(0xFF4A9EFF)),
+                              Icon(n.icon, size: 16, color: const Color(0xFF4A9EFF)),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(n.title,
-                                        style: const TextStyle(
-                                            fontSize: 12.5,
-                                            fontWeight: FontWeight.w600,
-                                            color: Color(0xFFCCCCCC))),
+                                    Text(n.title, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFFCCCCCC))),
                                     const SizedBox(height: 3),
-                                    Text(n.body,
-                                        style: const TextStyle(
-                                            fontSize: 11.5,
-                                            color: Color(0xFFAAAAAA),
-                                            height: 1.4)),
+                                    Text(n.body, style: const TextStyle(fontSize: 11.5, color: Color(0xFFAAAAAA), height: 1.4)),
                                     const SizedBox(height: 4),
-                                    Text(
-                                        _timeAgo(n.timestamp),
-                                        style: const TextStyle(
-                                            fontSize: 10,
-                                            color: Color(0xFF666666))),
+                                    Text(_timeAgo(n.timestamp), style: const TextStyle(fontSize: 10, color: Color(0xFF666666))),
                                   ],
                                 ),
                               ),
@@ -1730,16 +1610,7 @@ class SidebarContent extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 18, 14, 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(title,
-                style: const TextStyle(
-                  fontSize: 10,
-                  letterSpacing: 1.5,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF7A7A7A),
-                )),
-          ),
+          child: Align(alignment: Alignment.centerLeft, child: Text(title, style: const TextStyle(fontSize: 10, letterSpacing: 1.5, fontWeight: FontWeight.w600, color: Color(0xFF7A7A7A)))),
         ),
         Expanded(
           child: Center(
@@ -1748,13 +1619,7 @@ class SidebarContent extends StatelessWidget {
               children: [
                 Icon(icon, size: 32, color: const Color(0xFF444444)),
                 const SizedBox(height: 10),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Text(msg,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          fontSize: 12, color: Color(0xFF7A7A7A))),
-                ),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 20), child: Text(msg, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)))),
               ],
             ),
           ),
@@ -1769,16 +1634,7 @@ class SidebarContent extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(14, 18, 14, 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text('PROFILE',
-                style: TextStyle(
-                  fontSize: 10,
-                  letterSpacing: 1.5,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF7A7A7A),
-                )),
-          ),
+          child: Align(alignment: Alignment.centerLeft, child: Text('PROFILE', style: TextStyle(fontSize: 10, letterSpacing: 1.5, fontWeight: FontWeight.w600, color: Color(0xFF7A7A7A)))),
         ),
         Expanded(
           child: SingleChildScrollView(
@@ -1797,67 +1653,29 @@ class SidebarContent extends StatelessWidget {
         Container(
           width: 64,
           height: 64,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: const LinearGradient(
-              colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)],
-            ),
-          ),
+          decoration: const BoxDecoration(shape: BoxShape.circle, gradient: LinearGradient(colors: [Color(0xFF4A9EFF), Color(0xFF3FB950)])),
           child: Center(
             child: Text(
-              AuthService().displayName.isNotEmpty
-                  ? AuthService().displayName[0].toUpperCase()
-                  : '?',
-              style: const TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
+              AuthService().displayName.isNotEmpty ? AuthService().displayName[0].toUpperCase() : '?',
+              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ),
         ),
         const SizedBox(height: 12),
-        Text(
-          AuthService().displayName,
-          style: const TextStyle(
-            fontSize: 14,
-            color: Color(0xFFCCCCCC),
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text(AuthService().displayName, style: const TextStyle(fontSize: 14, color: Color(0xFFCCCCCC), fontWeight: FontWeight.w600)),
         const SizedBox(height: 3),
-        Text(
-          AuthService().email,
-          style: const TextStyle(
-            fontSize: 11.5,
-            color: Color(0xFF7A7A7A),
-          ),
-        ),
+        Text(AuthService().email, style: const TextStyle(fontSize: 11.5, color: Color(0xFF7A7A7A))),
         const SizedBox(height: 16),
         if (!verified)
           Container(
             padding: const EdgeInsets.all(12),
             margin: const EdgeInsets.only(bottom: 12),
-            decoration: BoxDecoration(
-              color: const Color(0xFFD29922).withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                  color: const Color(0xFFD29922).withOpacity(0.4)),
-            ),
+            decoration: BoxDecoration(color: const Color(0xFFD29922).withOpacity(0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFD29922).withOpacity(0.4))),
             child: Column(
               children: [
-                const Text('Email not verified',
-                    style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFFD29922))),
+                const Text('Email not verified', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFFD29922))),
                 const SizedBox(height: 4),
-                const Text(
-                    'Check your inbox and click the verification link.',
-                    style: TextStyle(
-                        fontSize: 11.5,
-                        color: Color(0xFFAAAAAA),
-                        height: 1.4)),
+                const Text('Check your inbox and click the verification link.', style: TextStyle(fontSize: 11.5, color: Color(0xFFAAAAAA), height: 1.4)),
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
@@ -1865,21 +1683,11 @@ class SidebarContent extends StatelessWidget {
                     onPressed: () async {
                       await AuthService().resendVerification();
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('Verification email sent')),
-                        );
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Verification email sent')));
                       }
                     },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFFD29922),
-                      side: const BorderSide(color: Color(0xFFD29922)),
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(6)),
-                    ),
-                    child: const Text('Resend',
-                        style: TextStyle(fontSize: 12)),
+                    style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFD29922), side: const BorderSide(color: Color(0xFFD29922)), padding: const EdgeInsets.symmetric(vertical: 8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6))),
+                    child: const Text('Resend', style: TextStyle(fontSize: 12)),
                   ),
                 ),
               ],
@@ -1888,22 +1696,13 @@ class SidebarContent extends StatelessWidget {
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFF202020),
-            borderRadius: BorderRadius.circular(10),
-          ),
+          decoration: BoxDecoration(color: const Color(0xFF202020), borderRadius: BorderRadius.circular(10)),
           child: const Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Signed in',
-                  style:
-                      TextStyle(fontSize: 11, color: Color(0xFF7A7A7A))),
+              Text('Signed in', style: TextStyle(fontSize: 11, color: Color(0xFF7A7A7A))),
               SizedBox(height: 4),
-              Text('Files sync automatically. Collaborate anytime.',
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFFAAAAAA),
-                      height: 1.4)),
+              Text('Files sync automatically. Collaborate anytime.', style: TextStyle(fontSize: 12, color: Color(0xFFAAAAAA), height: 1.4)),
             ],
           ),
         ),
@@ -1917,50 +1716,20 @@ class SidebarContent extends StatelessWidget {
         Container(
           width: 64,
           height: 64,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF252525),
-            border:
-                Border.all(color: const Color(0xFF303030), width: 1.5),
-          ),
-          child: const Icon(Icons.person_outline,
-              size: 28, color: Color(0xFF6A6A6A)),
+          decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF252525), border: Border.all(color: const Color(0xFF303030), width: 1.5)),
+          child: const Icon(Icons.person_outline, size: 28, color: Color(0xFF6A6A6A)),
         ),
         const SizedBox(height: 12),
-        const Text(
-          'Not signed in',
-          style: TextStyle(
-            fontSize: 13,
-            color: Color(0xFFCCCCCC),
-            fontWeight: FontWeight.w500,
-          ),
-        ),
+        const Text('Not signed in', style: TextStyle(fontSize: 13, color: Color(0xFFCCCCCC), fontWeight: FontWeight.w500)),
         const SizedBox(height: 4),
-        const Text(
-          'Sign in to sync files and collaborate in real time.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 12,
-            color: Color(0xFF7A7A7A),
-            height: 1.4,
-          ),
-        ),
+        const Text('Sign in to sync files and collaborate in real time.', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Color(0xFF7A7A7A), height: 1.4)),
         const SizedBox(height: 18),
         SizedBox(
           width: double.infinity,
           child: FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF4A9EFF),
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 11),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-            ),
-            onPressed: () {
-              Navigator.pop(context);
-            },
-            child: const Text('Sign in',
-                style: TextStyle(fontSize: 13)),
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF4A9EFF), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 11), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Sign in', style: TextStyle(fontSize: 13)),
           ),
         ),
       ],
