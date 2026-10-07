@@ -44,7 +44,6 @@ class PyIDEApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF1E1E1E),
-        // === [MODIFIED] Added readable SnackBar Theme ===
         snackBarTheme: const SnackBarThemeData(
           backgroundColor: Color(0xFF2C2C2C),
           contentTextStyle: TextStyle(color: Colors.white, fontSize: 13),
@@ -93,13 +92,19 @@ class _MainScaffoldState extends State<MainScaffold>
 
   bool _isSetupComplete = false;
   bool _isRunning = false;
-  // === [MODIFIED] Added Process tracking for infinite loops ===
-  Process? _currentProcess; 
+  Process? _currentProcess;
+
+  // === [MODIFIED] Buffers and Timer for smooth infinite loop output ===
+  Timer? _consoleTimer;
+  final StringBuffer _consoleBuffer = StringBuffer();
+
   String? _nativeLibDir;
   String? _pythonRoot;
 
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
+  final ScrollController _editorScrollController = ScrollController();
+  
   bool _isAutoIndenting = false;
   bool _isApplyingRemote = false;
   bool _showLineNumbers = true;
@@ -117,6 +122,7 @@ class _MainScaffoldState extends State<MainScaffold>
   bool _altActive = false;
   int _sidebarIndex = 0;
 
+  // Search
   final _searchController = TextEditingController();
   String _searchQuery = '';
   List<Map<String, dynamic>> _searchResults = [];
@@ -503,7 +509,8 @@ cd lib
 
       setState(() => _isSetupComplete = true);
     } catch (e) {
-      _append('Setup failed: $e');
+      _consoleBuffer.writeln('Setup failed: $e');
+      if (mounted) setState(() => _outputController.text = _consoleBuffer.toString());
     }
   }
 
@@ -515,19 +522,17 @@ cd lib
     };
   }
 
-  // === [MODIFIED] Sandboxed Save Directory Logic ===
   Future<String> _getSaveDirectory() async {
     final prefs = await SharedPreferences.getInstance();
     final useExternal = prefs.getBool('use_external_storage') ?? false;
 
     if (useExternal) {
       final path = prefs.getString('external_storage_path');
-      if (path != null && await Directory(path).exists()) {
+      if (path != null && path.isNotEmpty && await Directory(path).exists()) {
         return path;
       }
     }
 
-    // Default: Sandboxed "home" folder in app storage
     final appDir = await getApplicationDocumentsDirectory();
     final homeDir = Directory('${appDir.path}/home');
     if (!await homeDir.exists()) {
@@ -536,7 +541,7 @@ cd lib
     return homeDir.path;
   }
 
-  // === [MODIFIED] Real-Time Console Execution (Infinite Loop Fix) ===
+  // ============ RUN CODE (LIVE STREAM FIX) ============
   Future<void> _runCode() async {
     if (!_isSetupComplete || _nativeLibDir == null || _pythonRoot == null) return;
     FocusScope.of(context).unfocus();
@@ -544,12 +549,23 @@ cd lib
     setState(() {
       _isRunning = true;
       _showConsole = true;
-      _outputController.clear();
     });
 
-    _append('');
-    _append('▶ ${DateTime.now().toString().substring(11, 19)}');
-    _append('─' * 40);
+    _consoleBuffer.clear();
+    _consoleBuffer.writeln('');
+    _consoleBuffer.writeln('▶ ${DateTime.now().toString().substring(11, 19)}');
+    _consoleBuffer.writeln('─' * 40);
+
+    // Timer updates the UI every 100ms instead of thousands of times per second
+    _consoleTimer?.cancel();
+    _consoleTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (mounted) {
+        setState(() {
+          _outputController.text = _consoleBuffer.toString();
+        });
+        _scrollToBottom();
+      }
+    });
 
     final dir = await _getSaveDirectory();
     final scriptFile = File('$dir/script.py');
@@ -557,8 +573,6 @@ cd lib
 
     try {
       final cmd = '"$_nativeLibDir/libpython3-exec.so" "${scriptFile.path}"';
-      
-      // Use Process.start instead of Process.run for real-time streaming
       _currentProcess = await Process.start(
         '/system/bin/sh',
         ['-c', cmd],
@@ -566,40 +580,46 @@ cd lib
         includeParentEnvironment: true,
       );
 
-      // Stream stdout in real-time
       _currentProcess!.stdout.transform(utf8.decoder).listen((data) {
-        if (mounted) {
-          _outputController.text += data;
-          _scrollToBottom();
-        }
+        _consoleBuffer.write(data);
       });
 
-      // Stream stderr in real-time
       _currentProcess!.stderr.transform(utf8.decoder).listen((data) {
-        if (mounted) {
-          _outputController.text += data;
-          _scrollToBottom();
-        }
+        _consoleBuffer.write(data);
       });
 
       final exitCode = await _currentProcess!.exitCode;
+      _consoleTimer?.cancel();
       if (mounted) {
-        _append('─' * 40);
-        _append('[Done] exit $exitCode');
-        setState(() => _isRunning = false);
+        _consoleBuffer.writeln('─' * 40);
+        _consoleBuffer.writeln('[Done] exit $exitCode');
+        setState(() {
+          _outputController.text = _consoleBuffer.toString();
+          _isRunning = false;
+        });
+        _scrollToBottom();
       }
     } catch (e) {
+      _consoleTimer?.cancel();
       if (mounted) {
-        _append('Run error: $e');
-        setState(() => _isRunning = false);
+        _consoleBuffer.writeln('Run error: $e');
+        setState(() {
+          _outputController.text = _consoleBuffer.toString();
+          _isRunning = false;
+        });
       }
     }
   }
 
   void _stopCode() {
+    _consoleTimer?.cancel();
     _currentProcess?.kill();
     setState(() => _isRunning = false);
-    _append('Process stopped by user');
+    _consoleBuffer.writeln('Process stopped by user');
+    setState(() {
+      _outputController.text = _consoleBuffer.toString();
+    });
+    _scrollToBottom();
   }
 
   void _scrollToBottom() {
@@ -612,12 +632,10 @@ cd lib
     });
   }
 
-  void _append(String text) {
-    _outputController.text += '$text\n';
-    _scrollToBottom();
+  void _clearConsole() {
+    _consoleBuffer.clear();
+    setState(() => _outputController.clear());
   }
-
-  void _clearConsole() => setState(() => _outputController.clear());
 
   void _insertText(String text) {
     final value = _codeController.value;
@@ -674,24 +692,58 @@ cd lib
     _syncToCloud();
   }
 
-  // === [MODIFIED] Save File using Sandbox Logic ===
+  // ============ SAVE FILE WITH DIALOG ============
   Future<void> _saveCurrentFile() async {
     _tabs[_activeTab].content = _codeController.text;
-    final dir = await _getSaveDirectory();
-    final targetPath = _tabs[_activeTab].path ?? '$dir/${_tabs[_activeTab].name}';
-    
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF252525),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Text('Save File', style: TextStyle(color: Color(0xFFCCCCCC), fontSize: 16)),
+        content: const Text('Choose where to save this file:', style: TextStyle(color: Color(0xFFAAAAAA), fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final dir = await _getSaveDirectory();
+              final path = '${dir}/${_tabs[_activeTab].name}';
+              await _writeFile(path);
+            },
+            child: const Text('Sandbox (Home)', style: TextStyle(color: Color(0xFF4A9EFF))),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final path = await FilePicker.platform.saveFile(
+                dialogTitle: 'Save to device',
+                fileName: _tabs[_activeTab].name,
+                type: FileType.any,
+              );
+              if (path != null) {
+                await _writeFile(path);
+              }
+            },
+            child: const Text('Device Storage', style: TextStyle(color: Color(0xFF4A9EFF))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _writeFile(String path) async {
     try {
-      await File(targetPath).writeAsString(_tabs[_activeTab].content);
-      _tabs[_activeTab].path = targetPath; // Update path so it saves correctly next time
+      final file = File(path);
+      await file.writeAsString(_tabs[_activeTab].content);
+      _tabs[_activeTab].path = path;
+      _tabs[_activeTab].name = path.split('/').last;
       await _saveTabs();
       await _syncToCloud();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Saved ${_tabs[_activeTab].name}',
-                style: const TextStyle(fontSize: 13)),
-            duration: const Duration(seconds: 1),
-          ),
+          SnackBar(content: Text('Saved ${_tabs[_activeTab].name}')),
         );
       }
     } catch (e) {
@@ -703,7 +755,6 @@ cd lib
     }
   }
 
-  // === [MODIFIED] Open File using Sandbox Logic ===
   Future<void> _openFileFromDevice() async {
     try {
       final dir = await _getSaveDirectory();
@@ -847,9 +898,11 @@ cd lib
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveTabs();
+    _consoleTimer?.cancel(); // Fix: Cancel timer to prevent memory leak
     _codeController.removeListener(_onControllerChanged);
     _codeController.dispose();
     _editorFocus.dispose();
+    _editorScrollController.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
     _searchController.dispose();
@@ -953,7 +1006,6 @@ cd lib
           constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
           onPressed: _saveCurrentFile,
         ),
-        // === [MODIFIED] Run/Stop Button Toggle ===
         IconButton(
           icon: _isRunning
               ? const Icon(Icons.stop_rounded, size: 22, color: Colors.redAccent)
@@ -1060,12 +1112,10 @@ cd lib
     );
   }
 
-  // === [MODIFIED] Dynamic Line Numbers (Scales up to 5 digits) ===
   Widget _editor() {
     final lineCount = '\n'.allMatches(_codeController.text).length + 1;
     final digits = lineCount.toString().length;
     
-    // Scale gutter width based on digits
     double gutterWidth = 60;
     double gutterFontSize = 12;
     
@@ -1081,26 +1131,39 @@ cd lib
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
         data: CodeThemeData(styles: _themeStyles),
-        child: CodeField(
-          controller: _codeController,
-          focusNode: _editorFocus,
-          expands: true,
-          wrap: true,
-          textStyle: TextStyle(
-            fontFamily: 'monospace',
-            fontSize: _fontSize,
-            height: 1.5,
-          ),
-          gutterStyle: GutterStyle(
-            width: gutterWidth,
-            showLineNumbers: _showLineNumbers,
-            showErrors: false,
-            showFoldingHandles: false,
+        child: GestureDetector(
+          onVerticalDragUpdate: (details) {
+            if (_editorScrollController.hasClients) {
+              _editorScrollController.jumpTo(
+                (_editorScrollController.offset - details.delta.dy)
+                    .clamp(0.0, _editorScrollController.position.maxScrollExtent),
+              );
+            }
+          },
+          child: CodeField(
+            controller: _codeController,
+            focusNode: _editorFocus,
+            expands: false,
+            wrap: true,
+            // This gives the extra space at the bottom so you can scroll past the last line
+            padding: const EdgeInsets.only(bottom: 300, top: 8, left: 4, right: 4),
+            scrollController: _editorScrollController,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: gutterFontSize,
+              fontSize: _fontSize,
               height: 1.5,
-              color: const Color(0xFF5C6370),
+            ),
+            gutterStyle: GutterStyle(
+              width: gutterWidth,
+              showLineNumbers: _showLineNumbers,
+              showErrors: false,
+              showFoldingHandles: false,
+              textStyle: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: gutterFontSize,
+                height: 1.5,
+                color: const Color(0xFF5C6370),
+              ),
             ),
           ),
         ),
