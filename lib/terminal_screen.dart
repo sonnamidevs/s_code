@@ -17,26 +17,32 @@ class TerminalScreen extends StatefulWidget {
 class _TerminalScreenState extends State<TerminalScreen> {
   late final Terminal terminal;
   late final Pty pty;
-  late final StreamSubscription<String> _stdoutSub;
+  late final StreamSubscription<List<int>> _ptyOutputSub; // Updated type to match pty.output
 
   @override
   void initState() {
     super.initState();
     terminal = Terminal(maxLines: 10000);
+    
+    // Start the PTY process
     pty = Pty.start(
       'sh',
       columns: 80,
       rows: 24,
     );
 
-    _stdoutSub = pty.stdout.transform(utf8.decoder).listen((data) {
-      terminal.write(data);
+    // FIXED: 'pty.output' is the correct stream in flutter_pty 0.4.2
+    // It emits Uint8List, so we cast it to List<int> and decode it.
+    _ptyOutputSub = pty.output.cast<List<int>>().listen((data) {
+      terminal.write(utf8.decode(data));
     });
 
+    // Handle user input from xterm back to the PTY
     terminal.onOutput = (data) {
       pty.write(const Utf8Encoder().convert(data));
     };
 
+    // Handle terminal resizing
     terminal.onResize = (width, height, pixelWidth, pixelHeight) {
       pty.resize(height, width);
     };
@@ -44,7 +50,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   void dispose() {
-    _stdoutSub.cancel();
+    _ptyOutputSub.cancel();
     pty.kill();
     super.dispose();
   }
