@@ -12,14 +12,15 @@ dependencies:
   path_provider: ^2.1.4
   file_picker: ^8.0.0
   flutter_code_editor: ^0.3.2
-  xterm: ^4.0.0
-  flutter_pty: ^0.4.2
   highlight: ^0.7.0
   flutter_highlight: ^0.7.0
   shared_preferences: ^2.2.0
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.1
   cloud_firestore: ^5.4.4
+  xterm: ^4.0.0
+  flutter_pty: ^0.4.2
+  permission_handler: ^11.3.1
 
 dev_dependencies:
   flutter_test:
@@ -30,3 +31,5 @@ flutter:
   uses-material-design: true
   assets:
     - assets/python/python-embed.tar.gz
+dependency_overrides:
+  permission_handler_html: 0.1.4+1
