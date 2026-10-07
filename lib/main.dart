@@ -94,7 +94,7 @@ class _MainScaffoldState extends State<MainScaffold>
   bool _isRunning = false;
   Process? _currentProcess;
 
-  // === [MODIFIED] Buffers and Timer for smooth infinite loop output ===
+  // Buffers and Timer for smooth infinite loop output
   Timer? _consoleTimer;
   final StringBuffer _consoleBuffer = StringBuffer();
 
@@ -103,7 +103,6 @@ class _MainScaffoldState extends State<MainScaffold>
 
   late final CodeController _codeController;
   final FocusNode _editorFocus = FocusNode();
-  final ScrollController _editorScrollController = ScrollController();
   
   bool _isAutoIndenting = false;
   bool _isApplyingRemote = false;
@@ -898,11 +897,10 @@ cd lib
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveTabs();
-    _consoleTimer?.cancel(); // Fix: Cancel timer to prevent memory leak
+    _consoleTimer?.cancel(); 
     _codeController.removeListener(_onControllerChanged);
     _codeController.dispose();
     _editorFocus.dispose();
-    _editorScrollController.dispose();
     _outputController.dispose();
     _outputScroll.dispose();
     _searchController.dispose();
@@ -1131,39 +1129,28 @@ cd lib
       color: const Color(0xFF1E1E1E),
       child: CodeTheme(
         data: CodeThemeData(styles: _themeStyles),
-        child: GestureDetector(
-          onVerticalDragUpdate: (details) {
-            if (_editorScrollController.hasClients) {
-              _editorScrollController.jumpTo(
-                (_editorScrollController.offset - details.delta.dy)
-                    .clamp(0.0, _editorScrollController.position.maxScrollExtent),
-              );
-            }
-          },
-          child: CodeField(
-            controller: _codeController,
-            focusNode: _editorFocus,
-            expands: false,
-            wrap: true,
-            // This gives the extra space at the bottom so you can scroll past the last line
-            padding: const EdgeInsets.only(bottom: 300, top: 8, left: 4, right: 4),
-            scrollController: _editorScrollController,
+        child: CodeField(
+          controller: _codeController,
+          focusNode: _editorFocus,
+          expands: false,
+          wrap: true,
+          // This gives the extra space at the bottom so you can scroll past the last line
+          padding: const EdgeInsets.only(bottom: 300, top: 8, left: 4, right: 4),
+          textStyle: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: _fontSize,
+            height: 1.5,
+          ),
+          gutterStyle: GutterStyle(
+            width: gutterWidth,
+            showLineNumbers: _showLineNumbers,
+            showErrors: false,
+            showFoldingHandles: false,
             textStyle: TextStyle(
               fontFamily: 'monospace',
-              fontSize: _fontSize,
+              fontSize: gutterFontSize,
               height: 1.5,
-            ),
-            gutterStyle: GutterStyle(
-              width: gutterWidth,
-              showLineNumbers: _showLineNumbers,
-              showErrors: false,
-              showFoldingHandles: false,
-              textStyle: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: gutterFontSize,
-                height: 1.5,
-                color: const Color(0xFF5C6370),
-              ),
+              color: const Color(0xFF5C6370),
             ),
           ),
         ),
